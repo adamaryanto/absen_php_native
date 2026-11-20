@@ -326,7 +326,7 @@ if (isset($_GET['id'])) {
     // 2026-11-13 (revisi): denda telat & pulang awal TETAP kena buat borongan (Reza) —
     // jadi hanya denda istirahat/tidak lengkap yang di-nol-kan di sini.
     // (Ditaruh SEBELUM sembunyi lintas OS di bawah, supaya sembunyi itu tetap menang.)
-    if ($bor_total_detail > 0) {
+    if ($bor_total_detail > 0 && (int)($datadetail['status_realisasi_detail'] ?? 0) !== 1) {
         $upahPokokTampil = $bor_total_detail;
         $lembur_jam_val = 0;
         $lemburPokokTampil = 0;
@@ -584,7 +584,7 @@ if (!function_exists('rupiah')) {
                 </div>
 
                 <div class="row">
-                    <div class="form-group col-md-2"> <label>UPAH (POKOK)</label> <input type="number" name="tupah" value="<?= $upahPokokTampil ?>" class="form-control" min="0" <?= !empty($is_borongan_detail) ? 'readonly style="background: #f9fafb;" title="Baris borongan: upah ikut total borongan, tidak bisa diubah manual"' : 'title="Bisa diedit manual di sini — nilai ini yang disimpan (ubah upah hanya di Detail, bukan di Kelola)"' ?>> <input type="hidden" name="tupah_manual" value="0"> </div>
+                    <div class="form-group col-md-2"> <label>UPAH (POKOK)</label> <input type="number" name="tupah" value="<?= $upahPokokTampil ?>" class="form-control" min="0" onfocus="this.select()" title="Bisa diedit manual di sini — nilai ini yang disimpan (ubah upah hanya di Detail, bukan di Kelola)"> <input type="hidden" name="tupah_manual" value="0"> </div>
                     <div class="form-group col-md-2"> <label>POT. TELAT</label> <input type="number" name="tpottelat" value="<?= $hasilpotongantelat ?>" class="form-control" readonly style="background: #f9fafb;"> </div>
                     <div class="form-group col-md-2"> <label>POT. IST (AWAL)</label> <input type="number" name="tpotistirahatkeluar" value="<?= $hasilpotonganistirahatkeluar ?>" class="form-control" readonly style="background: #f9fafb;"> </div>
                     <div class="form-group col-md-2"> <label>POT. IST (TELAT)</label> <input type="number" name="tpotistirahatmasuk" value="<?= $hasilpotonganistirahatmasuk ?>" class="form-control" readonly style="background: #f9fafb;"> </div>
@@ -1056,7 +1056,7 @@ if (isset($_POST['simpan'])) {
     // Pengaman server untuk baris borongan (tanpa tukar): upah tetap 0 di sini,
     // berapapun nilai tupah yang dikirim, karena upah borongan ikut total borongan.
     // (Kalau ada tukar, rincian borongan sudah dihapus di atas, jadi bukan borongan lagi.)
-    if ($tukar_new <= 0 && !empty($is_borongan_detail)) {
+    if ($tukar_new <= 0 && !empty($is_borongan_detail) && !$tupah_manual) {
         $tupah = 0;
     }
 
