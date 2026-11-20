@@ -1,0 +1,497 @@
+﻿<?php
+// Check and create target columns in ms_karyawan if they don't exist
+$checkWeekly = $koneksi->query("SHOW COLUMNS FROM ms_karyawan LIKE 'target_mingguan'");
+if ($checkWeekly->num_rows == 0) {
+    $koneksi->query("ALTER TABLE ms_karyawan ADD COLUMN target_mingguan DECIMAL(10,2) DEFAULT 20.00");
+}
+$checkMonthly = $koneksi->query("SHOW COLUMNS FROM ms_karyawan LIKE 'target_bulanan'");
+if ($checkMonthly->num_rows == 0) {
+    $koneksi->query("ALTER TABLE ms_karyawan ADD COLUMN target_bulanan DECIMAL(10,2) DEFAULT 40.00");
+}
+
+// Check and create No Telp column if it doesn't exist (harus sebelum whatsapp)
+$checkTelp = $koneksi->query("SHOW COLUMNS FROM ms_karyawan LIKE 'no_telp'");
+if ($checkTelp->num_rows == 0) {
+    $koneksi->query("ALTER TABLE ms_karyawan ADD COLUMN no_telp VARCHAR(20) NULL DEFAULT NULL AFTER no_bpjs");
+}
+
+// Check and create WhatsApp column if it doesn't exist
+$checkWhatsApp = $koneksi->query("SHOW COLUMNS FROM ms_karyawan LIKE 'whatsapp'");
+if ($checkWhatsApp->num_rows == 0) {
+    $koneksi->query("ALTER TABLE ms_karyawan ADD COLUMN whatsapp VARCHAR(20) DEFAULT '' AFTER no_telp");
+}
+
+if (isset($_POST['simpan'])) {
+    $nama = $koneksi->real_escape_string($_POST['tnama']);
+    $noabsen = $koneksi->real_escape_string($_POST['tnoabsen']);
+    $departmen = !empty($_POST['tdepartmen']) ? intval($_POST['tdepartmen']) : 1;
+    $subdept = 0;
+    $jabatan = !empty($_POST['tjabatan']) ? intval($_POST['tjabatan']) : 1;
+    $os = !empty($_POST['tos']) ? intval($_POST['tos']) : 1;
+    $golongan = !empty($_POST['tgolongan']) ? intval($_POST['tgolongan']) : 1;
+    $periode = (isset($_POST['tperiode']) && in_array($_POST['tperiode'], ['Harian', '1 Minggu', '2 Minggu', '3 Minggu', '4 Minggu', '1 Bulan'], true))
+        ? $koneksi->real_escape_string($_POST['tperiode']) : 'Harian';
+    $jeniskelamin = (isset($_POST['tjeniskelamin']) && in_array($_POST['tjeniskelamin'], ['Laki-laki', 'Perempuan'], true)) ? "'" . $koneksi->real_escape_string($_POST['tjeniskelamin']) . "'" : "NULL";
+    $agama = $koneksi->real_escape_string($_POST['tagama']);
+    $tempatlahir = $koneksi->real_escape_string($_POST['ttempatlahir']);
+    $tanggallahir = !empty($_POST['ttanggallahir']) && $_POST['ttanggallahir'] !== '' ? $koneksi->real_escape_string($_POST['ttanggallahir']) : NULL;
+    $statuskawin = (isset($_POST['tstatuskawin']) && in_array($_POST['tstatuskawin'], ['Kawin', 'Belum Kawin', 'Janda', 'Duda'], true)) ? "'" . $koneksi->real_escape_string($_POST['tstatuskawin']) . "'" : "NULL";
+    $noktp = $koneksi->real_escape_string($_POST['tnoktp']);
+    $nobpjs = $koneksi->real_escape_string($_POST['tnobpjs']);
+    $notelp = isset($_POST['tnotelp']) ? $koneksi->real_escape_string($_POST['tnotelp']) : '';
+    $whatsapp = isset($_POST['twhatsapp']) ? $koneksi->real_escape_string($_POST['twhatsapp']) : '';
+    $alamatktp = isset($_POST['talamatktp']) ? $koneksi->real_escape_string($_POST['talamatktp']) : '';
+    $alamattinggal = isset($_POST['talamattinggal']) ? $koneksi->real_escape_string($_POST['talamattinggal']) : '';
+    $tanggalbergabung = isset($_POST['ttanggalbergabung']) && $_POST['ttanggalbergabung'] !== '' ? $koneksi->real_escape_string($_POST['ttanggalbergabung']) : date('Y-m-d');
+    $upah = !empty($_POST['tupah']) ? floatval(str_replace(['Rp', '.', ' '], '', $_POST['tupah'])) : 0;
+    $insentif = !empty($_POST['tinsentif']) ? floatval(str_replace(['Rp', '.', ' '], '', $_POST['tinsentif'])) : 0;
+    $jadwal = isset($_POST['tjadwal']) && $_POST['tjadwal'] !== '' ? (int)$_POST['tjadwal'] : 0;
+    $target_mingguan = !empty($_POST['ttarget_mingguan']) ? floatval($_POST['ttarget_mingguan']) : 20.00;
+    $target_bulanan = !empty($_POST['ttarget_bulanan']) ? floatval($_POST['ttarget_bulanan']) : 40.00;
+
+    $tgl_lahir_sql = $tanggallahir === NULL ? 'NULL' : "'$tanggallahir'";
+    
+    // Self-heal kolom insentif bulanan (per orang, dinamis).
+    $ckIns = $koneksi->query("SHOW COLUMNS FROM ms_karyawan LIKE 'insentif_bulanan'");
+    if ($ckIns && $ckIns->num_rows == 0) { $koneksi->query("ALTER TABLE ms_karyawan ADD COLUMN insentif_bulanan INT NOT NULL DEFAULT 0"); }
+    $ckPeriode = $koneksi->query("SHOW COLUMNS FROM ms_karyawan LIKE 'periode'");
+    if ($ckPeriode && $ckPeriode->num_rows == 0) { $koneksi->query("ALTER TABLE ms_karyawan ADD COLUMN periode VARCHAR(20) NOT NULL DEFAULT 'Harian'"); }
+    $sql = $koneksi->query("INSERT INTO ms_karyawan (
+        id_departmen, id_jabatan, no_absen, nama_karyawan, tempat_lahir, tgl_lahir, agama, 
+        status_kawin, jenis_kelamin, no_ktp, no_bpjs, no_telp, whatsapp, alamat_ktp, alamat_tinggal, 
+        status_karyawan, tgl_aktif, id_sub_department, id_os_dhk, id_golongan, periode, id_jadwal, upah, insentif_bulanan,
+        target_mingguan, target_bulanan
+    ) VALUES (
+        '$departmen', '$jabatan', '$noabsen', '$nama', '$tempatlahir', $tgl_lahir_sql, '$agama',
+        $statuskawin, $jeniskelamin, '$noktp', '$nobpjs', '$notelp', '$whatsapp', '$alamatktp', '$alamattinggal',
+        'Aktif', '$tanggalbergabung', '$subdept', '$os', '$golongan', '$periode', '$jadwal', '$upah', '$insentif',
+        '$target_mingguan', '$target_bulanan'
+    )");
+
+    if ($sql) {
+        // FIX 2026-09-04: sync jangan bikin blank, gak blokir save
+        $karyawan_id = $koneksi->insert_id;
+        $sync_results = [];
+        $sync_message = '';
+        $sync_success = true;
+        try {
+            include_once __DIR__ . '/../../device_sync_helper.php';
+            create_sync_log_table($koneksi);
+            set_time_limit(15);
+            $sync_results = sync_karyawan_to_devices($koneksi, $karyawan_id);
+            set_time_limit(30);
+            // Sync ke Access.mdb ZK (direct COM) â€” biar langsung ke kiri di ZK
+            // Jangan tampilkan debug di alert, cukup di log
+            if(file_exists(__DIR__.'/../../zk_access_helper.php')){
+                include_once __DIR__.'/../../zk_access_helper.php';
+                if(function_exists('zk_update_user')){
+                    @zk_update_user($noabsen, $_POST['tnama']);
+                }
+            }
+            // Hit juga API rekap_sinkronisasi biar kayak manual (tambah_karyawan via API langsung kiri + ada Nama)
+            $apiUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS']==='on' ? 'https' : 'http')."://".$_SERVER['HTTP_HOST'].dirname($_SERVER['SCRIPT_NAME'])."/rekap_sinkronisasi.php?auth=R3kap_Ledger_9fK8xQ2v7ZpL4_2026&mode=tambah_karyawan&pin=".urlencode($noabsen)."&nama=".urlencode($_POST['tnama'])."&bagian=".urlencode($_POST['tdepartmen'] ?? 'Umum');
+            // Normalisasi path (soalnya tambah.php di page/karyawan/)
+            $apiUrl = preg_replace('#/page/karyawan/.*#','/rekap_sinkronisasi.php?auth=R3kap_Ledger_9fK8xQ2v7ZpL4_2026&mode=tambah_karyawan&pin='.urlencode($noabsen).'&nama='.urlencode($_POST['tnama']).'&bagian='.urlencode($_POST['tdepartmen'] ?? 'Umum'), $apiUrl);
+            if(strpos($apiUrl,'rekap_sinkronisasi.php')===false){
+                $apiUrl = "http://".$_SERVER['HTTP_HOST']."/absen/rekap_sinkronisasi.php?auth=R3kap_Ledger_9fK8xQ2v7ZpL4_2026&mode=tambah_karyawan&pin=".urlencode($noabsen)."&nama=".urlencode($_POST['tnama'])."&bagian=".urlencode($_POST['tdepartmen'] ?? 'Umum');
+            }
+            $ctx=stream_context_create(['http'=>['timeout'=>5]]); @file_get_contents($apiUrl,false,$ctx);
+        } catch (Throwable $e) {
+            $sync_results = [];
+            $sync_success = false;
+            error_log("Sync tambah $karyawan_id error: ".$e->getMessage());
+        }
+        
+        // Prepare sync status message
+        $sync_message = '';
+        $sync_success = true;
+        foreach($sync_results as $device_id => $result) {
+            if(isset($result['status'])) {
+                log_sync_activity($koneksi, 'karyawan_add', $device_id, $karyawan_id, 
+                                 $result['status'], $result['message']);
+                
+                if($result['status'] == 'error') {
+                    $sync_success = false;
+                    $sync_message .= "\\nâ€¢ " . $result['device'] . ": " . $result['message'];
+                }
+            }
+        }
+        
+        echo "<!DOCTYPE html>
+        <html>
+        <head>
+            <script src='https://cdn.jsdelivr.net/npm/sweetalert2@11'></script>
+        </head>
+        <body>
+            <script>
+                Swal.fire({
+                    icon: 'success',
+                    title: 'Berhasil',
+                    html: 'Data karyawan berhasil disimpan.',
+                    confirmButtonColor: '#4f46e5',
+                    confirmButtonText: 'Selesai'
+                }).then((result) => {
+                    window.location.href='?page=karyawan';
+                });
+            </script>
+        </body>
+        </html>";
+        exit;
+    } else {
+        echo "<!DOCTYPE html>
+        <html>
+        <head>
+            <script src='https://cdn.jsdelivr.net/npm/sweetalert2@11'></script>
+        </head>
+        <body>
+            <script>
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Gagal',
+                    text: 'Gagal Simpan Data: " . $koneksi->error . "',
+                    confirmButtonColor: '#4f46e5',
+                    confirmButtonText: 'Ok'
+                });
+            </script>
+        </body>
+        </html>";
+    }
+}
+?>
+
+<div class="container-fluid px-4 mt-5 mb-5">
+    <div class="card border-0 shadow-lg rounded-xl overflow-hidden">
+
+        <div class="card-header bg-white border-b border-gray-100 py-5 px-6 flex flex-row items-center justify-between">
+            <div class="flex-grow">
+                <h3 class="text-2xl font-extrabold text-indigo-600 tracking-tight m-0"><i class="fas fa-user-tie mr-3 text-indigo-600"></i>Tambah Data Karyawan</h3>
+                <p class="text-sm text-gray-500 mt-1">Lengkapi formulir di bawah ini untuk mendaftarkan karyawan baru.</p>
+            </div>
+            <div class="flex-shrink-0 ml-4">
+                <a href="?page=karyawan" class="inline-flex items-center bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 px-6 rounded-lg transition duration-200 shadow-md">
+                    <i class="fas fa-arrow-left mr-2"></i>
+                    Kembali
+                </a>
+            </div>
+        </div>
+
+        <form method="POST" enctype="multipart/form-data" id="formTambahKaryawan">
+            <div class="card-body p-6 bg-gray-50/30">
+                
+                <div class="mb-8">
+                    <h4 class="text-sm font-bold text-indigo-600 uppercase tracking-wider mb-4 flex items-center">
+                        <i class="fas fa-user-circle mr-2 text-lg"></i> Informasi Pribadi & Posisi
+                    </h4>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-x-8 gap-y-6 bg-white p-6 rounded-xl border border-gray-100 shadow-sm">
+                        
+                        <input type="hidden" name="tid">
+
+                          <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">No. Absen</label>
+                                  <?php
+                                $q_absen = $koneksi->query("SELECT MAX(CAST(no_absen AS UNSIGNED)) as max_absen FROM ms_karyawan");
+                                $dt_absen = $q_absen->fetch_assoc();
+                                $new_absen = (int)$dt_absen['max_absen'] + 1;
+                            ?>
+                            <input type="text" name="tnoabsen" value="<?= $new_absen; ?>" readonly class="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-gray-100 text-gray-500 font-bold cursor-not-allowed">
+                        </div>
+
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Nama Lengkap <span class="text-red-500">*</span></label>
+                            <input autocomplete="off" type="text" name="tnama" required class="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all outline-none" placeholder="Masukkan nama lengkap">
+                        </div>
+
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Status Karyawan</label>
+                            <select name="tstatuskaryawan" class="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none">
+                                <option value="Aktif">Aktif</option>
+                                <option value="Non Aktif">Non Aktif</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Bagian</label>
+                            <select name="tdepartmen" class="w-full select2-manage px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none" data-placeholder="- Pilih Bagian -" data-delete-route="bagian">
+                                <option value=""></option>
+                                <option value="add_new" class="font-bold text-indigo-600">+ Tambah Bagian Baru...</option>
+                                <?php
+                                $q_dept = $koneksi->query("SELECT * FROM ms_departmen");
+                                while($d = $q_dept->fetch_assoc()) {
+                                    echo "<option value='".$d['id_departmen']."'>".$d['nama_departmen']."</option>";
+                                }
+                                ?>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Posisi</label>
+                            <select name="tjabatan" class="w-full select2-manage px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none" data-placeholder="- Pilih Posisi -" data-delete-route="jabatan">
+                                <option value=""></option>
+                                <option value="add_new" class="font-bold text-indigo-600">+ Tambah Posisi Baru...</option>
+                                <?php
+                                $q_jab = $koneksi->query("SELECT * FROM ms_jabatan");
+                                while($d = $q_jab->fetch_assoc()) {
+                                    echo "<option value='".$d['id_jabatan']."'>".$d['jabatan']."</option>";
+                                }
+                                ?>
+                            </select>
+                        </div>
+
+
+
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">OS / DHK <span class="text-red-500">*</span></label>
+                            <select name="tos" class="w-full select2-manage px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none" data-placeholder="- Pilih -" data-delete-route="os_dhk" required>
+                                <option value=""></option>
+                                <option value="add_new" class="font-bold text-indigo-600">+ Tambah Baru...</option>
+                                <?php
+                                $q_os = $koneksi->query("SELECT * FROM ms_os_dhk");
+                                while($d = $q_os->fetch_assoc()) {
+                                    echo "<option value='".$d['id_os_dhk']."'>".$d['OS_DHK']."</option>";
+                                }
+                                ?>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Golongan</label>
+                            <div class="max-w-xs">
+                                <select name="tgolongan" class="w-full select2-manage px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none" data-placeholder="- Pilih -" data-delete-route="golongan">
+                                    <option value=""></option>
+                                    <option value="add_new" class="font-bold text-indigo-600">+ Tambah Baru...</option>
+                                    <?php
+                                    $q_gol = $koneksi->query("SELECT * FROM ms_golongan");
+                                    while($d = $q_gol->fetch_assoc()) {
+                                        echo "<option value='".$d['id_golongan']."'>".$d['golongan']."</option>";
+                                    }
+                                    ?>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Periode Pembayaran</label>
+                            <div class="max-w-xs">
+                                <select name="tperiode" class="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none">
+                                    <?php foreach (['Harian', '1 Minggu', '2 Minggu', '3 Minggu', '4 Minggu', '1 Bulan'] as $po): ?>
+                                        <option value="<?= $po ?>" <?= $po === 'Harian' ? 'selected' : '' ?>><?= $po ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Shift / Jadwal <span class="text-red-500">*</span></label>
+                            <select name="tjadwal" required class="w-full select2 px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none">
+                                <option value="">- Pilih Shift -</option>
+                                <?php
+                                $q_shift = $koneksi->query("SELECT * FROM tb_jadwal");
+                                while($d = $q_shift->fetch_assoc()) {
+                                    echo "<option value='".$d['id_jadwal']."'>".$d['keterangan']." (".$d['jam_masuk']." - ".$d['jam_keluar'].")</option>";
+                                }
+                                ?>
+                            </select>
+                        </div>
+
+                         <div class="form-group target-fields" style="display: none;">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Target Mingguan (Jam)</label>
+                            <input type="number" step="0.1" name="ttarget_mingguan" value="20.0" class="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none">
+                        </div>
+                        <div class="form-group target-fields" style="display: none;">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Target Bulanan (Jam)</label>
+                            <input type="number" step="0.1" name="ttarget_bulanan" value="40.0" class="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none">
+                        </div>
+
+                        
+
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Jenis Kelamin</label>
+                            <select name="tjeniskelamin" class="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none">
+                                <option value="Laki-laki">Laki-laki</option>
+                                <option value="Perempuan">Perempuan</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Agama</label>
+                            <select name="tagama" class="w-full select2 px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none">
+                                <option value="">- Pilih Agama -</option>
+                                <option value="Islam">Islam</option>
+                                <option value="Kristen Protestan">Kristen Protestan</option>
+                                <option value="Kristen Katolik">Kristen Katolik</option>
+                                <option value="Hindu">Hindu</option>
+                                <option value="Budha">Budha</option>
+                                <option value="Khonghucu">Khonghucu</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Tempat Lahir</label>
+                            <input type="text" name="ttempatlahir" class="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="Contoh: Jakarta">
+                        </div>
+
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Tanggal Lahir</label>
+                            <input type="date" name="ttanggallahir" class="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none">
+                        </div>
+
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Status Kawin</label>
+                            <select name="tstatuskawin" class="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none">
+                                <option value="">- Pilih Status -</option>
+                                <option value="Kawin">Kawin</option>
+                                <option value="Belum Kawin">Belum Kawin</option>
+                                <option value="Janda">Janda</option>
+                                <option value="Duda">Duda</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Tanggal Bergabung <span class="text-red-500">*</span></label>
+                            <input type="date" name="ttanggalbergabung" required class="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none">
+                        </div>
+
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Upah Harian (Rp) <span class="text-gray-400">(Boleh 0 untuk tim boneless)</span></label>
+                            <input type="text" name="tupah" id="tupah_format" class="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none font-bold text-indigo-700" placeholder="0" value="0">
+                        </div>
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Insentif Bulanan (Rp) <span class="text-gray-400">(0 = tanpa insentif, bisa beda per orang)</span></label>
+                            <input type="text" name="tinsentif" id="tinsentif_format" class="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none font-bold text-indigo-700" placeholder="0" value="0">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mb-8">
+                    <h4 class="text-sm font-bold text-indigo-600 uppercase tracking-wider mb-4 flex items-center">
+                        <i class="fas fa-file-alt mr-2 text-lg"></i> Dokumen & Domisili
+                    </h4>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6 bg-white p-6 rounded-xl border border-gray-100 shadow-sm">
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">No. KTP</label>
+                            <input type="text" name="tnoktp" class="max-w-md w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="16 Digit No. KTP">
+                        </div>
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">No. BPJS</label>
+                            <input type="text" name="tnobpjs" class="max-w-md w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="No. BPJS Ketenagakerjaan/Kesehatan">
+                        </div>
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">No. Telp</label>
+                            <input type="text" name="tnotelp" class="max-w-md w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="cth: 08123456789">
+                        </div>
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">WhatsApp</label>
+                            <input type="text" name="twhatsapp" class="max-w-md w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="cth: 08123456789">
+                        </div>
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Alamat Lengkap (KTP)</label>
+                            <textarea name="talamatktp" rows="3" class="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="Jl. Contoh No. 123..."></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">Alamat Lengkap (Tinggal)</label>
+                            <textarea name="talamattinggal" rows="3" class="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="Jl. Contoh No. 123..."></textarea>
+                        </div>
+                    </div>
+                </div>
+
+                
+
+            </div>
+
+            <div class="card-footer bg-gray-50 px-8 py-5 flex items-center justify-between border-t border-gray-200">
+                <p class="text-xs text-gray-400 italic">Tanda <span class="text-red-500 font-bold">*</span> wajib diisi.</p>
+                <div class="flex gap-3">
+                     <button type="reset" class="px-6 py-2.5 rounded-lg border border-gray-300 text-gray-700 font-bold hover:bg-gray-100 transition-all cursor-pointer">
+                        <i class="fas fa-undo mr-2"></i> Batal
+                    </button>
+                    <button type="submit" name="simpan" value="Simpan" class="px-8 py-2.5 border-0 bg-indigo-600 text-white rounded-lg font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-200 transition-all transform hover:-translate-y-0.5">
+                        <i class="fas fa-save mr-2"></i> Simpan Data
+                    </button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
+<style>
+    /* Menghilangkan panah pada input number agar lebih bersih */
+    input::-webkit-outer-spin-button,
+    input::-webkit-inner-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+    }
+</style>
+
+<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+
+<script>
+$(document).ready(function() {
+    function toggleTargetFields() {
+        var selectVal = $('select[name="tjadwal"]').val();
+        var selectedText = $('select[name="tjadwal"] option[value="' + selectVal + '"]').text() || '';
+        if (selectedText.toUpperCase().indexOf('FLEXI') !== -1 || selectedText.toUpperCase().indexOf('FLEKSI') !== -1) {
+            $('.target-fields').show();
+        } else {
+            $('.target-fields').hide();
+        }
+    }
+    
+    // Run on load, delayed load, and on change (including select2)
+    toggleTargetFields();
+    setTimeout(toggleTargetFields, 100);
+    setTimeout(toggleTargetFields, 500);
+    $('select[name="tjadwal"]').on('change change.select2', function() {
+        toggleTargetFields();
+    });
+
+    $('#tupah_format').on('input', function() {
+        let val = $(this).val().replace(/[^0-9]/g, '');
+        if (val !== "") {
+            $(this).val(new Intl.NumberFormat('id-ID').format(parseInt(val)));
+        }
+    });
+
+    $('#tinsentif_format').on('input', function() {
+        let val = $(this).val().replace(/[^0-9]/g, '');
+        if (val !== "") {
+            $(this).val(new Intl.NumberFormat('id-ID').format(parseInt(val)));
+        }
+    });
+
+    $('.select2-manage').on('change', function() {
+        var $select = $(this);
+        var selectName = $select.attr('name');
+        var selectedVal = $select.val();
+        var route = $select.data('delete-route');
+
+        if (selectedVal === 'add_new') {
+            var label = $select.closest('.form-group').find('label').text().replace('*', '').trim();
+            var newData = prompt("Masukkan " + label + " Baru:");
+
+            if (newData && newData.trim() !== "") {
+                $.post('page/ajax/tambah_master.php', {
+                    value: newData.trim(),
+                    route: route
+                }, function(res) {
+                    if (res.success) {
+                        var newOption = new Option(res.value, res.id, true, true);
+                        $select.append(newOption).trigger('change');
+                    } else {
+                        alert('Gagal menambah data: ' + res.message);
+                        $select.val('').trigger('change');
+                    }
+                }, 'json');
+            } else {
+                $select.val('').trigger('change');
+            }
+        }
+           // 2. Logika untuk Reset Form
+        $('#formUbahKaryawan').on('reset', function() {
+            setTimeout(function() {
+                $('.select2-manage').trigger('change.select2');
+                $('.select2').trigger('change.select2');
+            }, 10);
+        });
+    });
+});
+</script>

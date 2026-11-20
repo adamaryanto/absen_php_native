@@ -1,0 +1,564 @@
+<?php
+// Import Excel absensi harian -> tb_rkk (+detail) saja. Realisasi dibuat setelah RKK di-approve.
+// Format: sheet PERENCANAAN + REALISASI (atau .xls hasil export), kolom:
+//   A No | B Nama | C Paraf | D OS/DHK | E Golongan | F Posisi | G Jam Kerja
+//   H Jam Masuk | I Istirahat | J Jam Pulang | K Hasil | L Upah | M Potongan | N Lembur | O Upah Dibayar
+// Section di Excel = grup borongan (dibuat otomatis bila belum ada).
+// Alur: upload -> preview (cocok/baru/kotor) -> commit.
+
+require_once __DIR__ . '/import_lib.php';
+include_once __DIR__ . '/../grup_borongan/_setup.php';
+rx_ensure_schema($koneksi); // tambah otomatis kolom/tabel master yang kurang
+
+$alert = null;
+$redirect = null;
+$step = $_POST['rx_step'] ?? 'upload';
+
+if ($step === 'commit') {
+    // ===== COMMIT =====
+    $imp = $_SESSION['rx_import'] ?? null;
+    if (!$imp) {
+        $alert = ["icon" => "error", "title" => "Kedaluwarsa", "text" => "Data preview kedaluwarsa. Upload ulang filenya."];
+    } else {
+        $sel = [];
+        // Payload JSON dari JS (1 variabel, kebal max_input_vars): uraikan ke $_POST agar logika bawah tetap sama.
+        // Tanpa JS (fallback) alur lama via rx_sel[] + sh_/up_/dp_/ps_ tetap jalan.
+        if (!empty($_POST['rx_payload'])) {
+            $dec = json_decode((string)$_POST['rx_payload'], true);
+            if (is_array($dec)) {
+                $_POST['rx_sel'] = [];
+                foreach ($dec as $pr) {
+                    if (!is_array($pr)) continue;
+                    $pi = (int)($pr['i'] ?? -1);
+                    if ($pi < 0) continue;
+                    $_POST['rx_sel'][] = $pi;
+                    foreach (['sh', 'up', 'dp', 'ps'] as $kk) {
+                        if (array_key_exists($kk, $pr)) $_POST[$kk . '_' . $pi] = $pr[$kk];
+                    }
+                }
+            }
+        }
+        $sel = array_map('intval', (array)($_POST['rx_sel'] ?? []));
+        $rows = [];
+        foreach (($imp['rows'] ?? []) as $i => $r) {
+            if (!in_array($i, $sel, true)) continue;
+            $r['shift_id'] = (isset($_POST["sh_$i"]) && ctype_digit((string)$_POST["sh_$i"])) ? (int)$_POST["sh_$i"] : (int)($r['shift_id'] ?? 0);
+            $r['sh_raw'] = isset($_POST["sh_$i"]) ? trim((string)$_POST["sh_$i"]) : '';
+            $r['upah'] = isset($_POST["up_$i"]) ? max(0, (int)str_replace('.', '', $_POST["up_$i"])) : (int)($r['upah'] ?? 0);
+            $r['dept_id'] = isset($_POST["dp_$i"]) ? (int)$_POST["dp_$i"] : (int)($r['dept_id'] ?? 0);
+            $r['dp_raw'] = isset($_POST["dp_$i"]) ? trim((string)$_POST["dp_$i"]) : '';
+            $r['sub_id'] = isset($_POST["ps_$i"]) ? (int)$_POST["ps_$i"] : (int)($r['sub_id'] ?? 0);
+            $r['ps_raw'] = isset($_POST["ps_$i"]) ? trim((string)$_POST["ps_$i"]) : '';
+            $rows[] = $r;
+        }
+        if (empty($rows)) {
+            $alert = ["icon" => "warning", "title" => "Kosong", "text" => "Tidak ada baris yang dipilih."];
+        } else {
+            $tgl = preg_match('/^\d{4}-\d{2}-\d{2}$/', $imp['date'] ?? '') ? $imp['date'] : null;
+            $tgl = !empty($_POST['rx_date']) ? $_POST['rx_date'] : $tgl;
+            if (!$tgl) {
+                $alert = ["icon" => "error", "title" => "Tanggal Invalid", "text" => "Tanggal tidak valid."];
+            } else {
+                $cek = $koneksi->query("SELECT id_rkk FROM tb_rkk WHERE tgl_rkk='$tgl' LIMIT 1");
+                if ($cek && $cek->num_rows > 0) {
+                    $zid = (int)$cek->fetch_assoc()['id_rkk'];
+                    $jz = $koneksi->query("SELECT COUNT(*) c FROM tb_rkk_detail WHERE id_rkk='$zid'")->fetch_assoc()['c'] ?? 0;
+                    if ((int)$jz > 0) {
+                        $alert = ["icon" => "warning", "title" => "Sudah Ada", "text" => "Tanggal $tgl sudah ada RKK-nya. Hapus dulu via halaman RKK kalau mau import ulang."];
+                    } else {
+                        // Zombie (header tanpa isi, sisa import gagal) — bersihkan RKK-nya saja
+                        $koneksi->query("DELETE FROM tb_rkk WHERE id_rkk='$zid'");
+                    }
+                }
+                if (!$alert) {
+                    set_time_limit(0); // file besar butuh waktu
+                    include_once __DIR__ . '/../../device_sync_helper.php';
+                    create_sync_log_table($koneksi);
+                    $koneksi->begin_transaction();
+                    $tx_fail = '';
+                    $now = date('Y-m-d H:i:s');
+                    $new_karyawan_ids = []; // karyawan baru -> auto push ke mesin setelah commit
+                    $ket = $koneksi->real_escape_string('Import Excel ' . ($imp['title'] ?? $tgl));
+                    $jamkerja = 0; // durasi shift terlama (jam); dihitung per baris di loop bawah.
+                    // Catatan: kolom JAM KERJA di Excel = fraksi JAM MASUK shift (0.25 = jam 6), bukan durasi — jangan di-max langsung.
+                    if (!$koneksi->query("INSERT INTO tb_rkk (tgl_rkk, keterangan, jam_kerja, detail_rkk, status_rkk, tgl_status) VALUES ('$tgl', '$ket', '0', '$now', '0', '$now')")) $tx_fail = 'Gagal menyimpan header RKK.';
+                    $id_rkk = $koneksi->insert_id;
+                    $c_kar = 0; $c_new = 0; $c_grup = 0; $c_shift = 0; $c_agt = 0;
+                    $qd = $koneksi->query("SELECT MIN(id_departmen) AS m FROM ms_departmen");
+                    $def_dept = ($qd && ($rd = $qd->fetch_assoc()) && $rd['m']) ? (int)$rd['m'] : 0;
+                    $qs = $koneksi->query("SELECT MIN(id_sub_department) AS m FROM ms_sub_department");
+                    $def_sub = ($qs && ($rs = $qs->fetch_assoc()) && $rs['m']) ? (int)$rs['m'] : 0;
+                    $grup_map = []; // section upper => id_grup
+                    foreach ($rows as $r) {
+                        $sec = trim($r['section'] ?? '');
+                        $id_grup = null;
+                        if ($sec !== '') {
+                            $uk = mb_strtoupper($sec);
+                            if (!array_key_exists($uk, $grup_map)) $grup_map[$uk] = rk_ensure_grup($koneksi, $sec, $c_grup);
+                            $id_grup = $grup_map[$uk];
+                        }
+                        $vg = ($id_grup === null) ? "NULL" : "'$id_grup'";
+                        $dep = (int)($r['dept_id'] ?? 0) > 0 ? (int)$r['dept_id'] : $def_dept;
+                        $dep = rx_commit_dept($koneksi, $r, $dep); // opsi teks "(baru)" -> generate otomatis
+                        $sub = rx_commit_sub($koneksi, $r, $dep);
+                        $dep = rx_valid_dept($koneksi, $dep);
+                        $sub = rx_valid_sub($koneksi, $sub, $dep);
+                        $vdep = ($dep > 0) ? "'$dep'" : "NULL";
+                        $vsub = ($sub > 0) ? "'$sub'" : "NULL";
+                        $jd = rx_commit_shift($koneksi, $r, $c_shift);
+                        // Lacak durasi shift terlama (keluar - masuk, sadar lewat tengah malam)
+                        if ($jd > 0) {
+                            $jq = $koneksi->query("SELECT jam_masuk, jam_keluar FROM tb_jadwal WHERE id_jadwal='$jd' LIMIT 1");
+                            if ($jq && ($jr = $jq->fetch_assoc())) {
+                                $sm = trim((string)($jr['jam_masuk'] ?? ''));
+                                $sk = trim((string)($jr['jam_keluar'] ?? ''));
+                                $tin = strtotime($sm); $tout = strtotime($sk);
+                                if ($tin !== false && $tout !== false && !(($sm === '' || $sm === '00:00:00') && ($sk === '' || $sk === '00:00:00'))) {
+                                    $dur = ($tout - $tin) / 3600;
+                                    if ($dur <= 0) $dur += 24;
+                                    if ($dur > 0 && $dur <= 24 && $dur > $jamkerja) $jamkerja = $dur;
+                                }
+                            }
+                        }
+                        $kid = (int)($r['karyawan_id'] ?? 0);
+                        if ($kid <= 0 && !empty($r['nama'])) {
+                            $kid = rx_make_karyawan($koneksi, $r['nama'], $r['osdhk'] ?? '', $r['golongan'] ?? '', $r['posisi'] ?? '', $jd, $r['upah'] ?? 0, $tgl, $dep, $sub);
+                            if ($kid > 0) {
+                                $c_new++;
+                                $new_karyawan_ids[] = $kid;
+                                // Paksa dept/posisi master ikut pilihan preview (bukan tebakan teks Excel)
+                                $koneksi->query("UPDATE ms_karyawan SET id_departmen='$dep', id_sub_department='$sub' WHERE id_karyawan='$kid'");
+                            }
+                        }
+                        if ($kid <= 0) continue;
+                        // Auto-masuk master grup: section Excel = grupnya (boleh rangkap, tidak mengeluarkan dari grup lama)
+                        if ($id_grup !== null) {
+                            $gid_ins = (int)$id_grup;
+                            if ($koneksi->query("INSERT IGNORE INTO ms_grup_borongan_anggota (id_grup, id_karyawan, tarif, is_borongan) VALUES ('$gid_ins', '$kid', NULL, 0)")) {
+                                if ((int)$koneksi->affected_rows > 0) $c_agt++;
+                            }
+                        }
+                        // Lengkapi OS/Golongan master yang masih kosong dari Excel
+                        rx_fill_master_osgol($koneksi, $kid, $r['osdhk'] ?? '', $r['golongan'] ?? '');
+                        $up = (float)($r['upah'] ?? 0);
+                        if (!$koneksi->query("INSERT INTO tb_rkk_detail (id_rkk, id_karyawan, nama_karyawan_manual, id_departmen, id_sub_department, upah, status_rkk, id_jadwal, id_grup, potongan_telat, potongan_istirahat, potongan_lainnya, tgl_updt) VALUES ('$id_rkk', '$kid', NULL, $vdep, $vsub, '$up', 'Hadir', '$jd', $vg, '0', '0', '0', '$now')")) { $tx_fail = 'Gagal menyimpan detail RKK.'; break; }
+                        $c_kar++;
+                    }
+                    // Realisasi SENGAJA tidak dibuat dari import Excel (dibuat terpisah via Tambah Realisasi + Tarik Data).
+                    $jamkerja = $jamkerja > 0 ? (int)round($jamkerja) : 12;
+                    if ($tx_fail === '' && !$koneksi->query("UPDATE tb_rkk SET jam_kerja='$jamkerja' WHERE id_rkk='$id_rkk'")) $tx_fail = 'Gagal menyimpan jam kerja RKK.';
+                    if ($tx_fail !== '') {
+                        $koneksi->rollback();
+                        $alert = ["icon" => "error", "title" => "Import Gagal", "text" => $tx_fail . " Semua dibatalkan, tidak ada data setengah jadi. Coba lagi."];
+                    } else {
+                        $koneksi->commit();
+                        // Auto-push karyawan baru hasil import ke semua mesin absen
+                        $sync_msg = '';
+                        if (!empty($new_karyawan_ids)) {
+                            $sync_ok = 0; $sync_fail = 0; $sync_skip = 0;
+                            foreach ($new_karyawan_ids as $new_id) {
+                                try {
+                                    $sync_res = sync_karyawan_to_devices($koneksi, (int)$new_id);
+                                    foreach ((array)$sync_res as $did => $srr) {
+                                        $st = $srr['status'] ?? '';
+                                        if ($st === 'success') $sync_ok++;
+                                        elseif ($st === 'error') $sync_fail++;
+                                        else $sync_skip++;
+                                    }
+                                } catch (Throwable $e) {
+                                    $sync_fail++;
+                                    error_log('Import auto-sync #' . $new_id . ': ' . $e->getMessage());
+                                }
+                            }
+                            $sync_msg = ", sync mesin: $sync_ok sukses" . ($sync_fail > 0 ? ", $sync_fail gagal" : '') . ($sync_skip > 0 ? ", $sync_skip skip" : '');
+                        }
+                        // Boneless auto-isi halaman Boneless (bukan kelola), setelah RKK tersimpan
+                        $bon_msg = rx_save_boneless($koneksi, $tgl, $id_rkk, $imp['boneless'] ?? null, $imp['title'] ?? '');
+                    unset($_SESSION['rx_import']);
+                    $alert = ["icon" => "success", "title" => "Import Selesai",
+                        "text" => "RKK#$id_rkk ($tgl): $c_kar karyawan" . ($c_new > 0 ? " ($c_new karyawan baru)" : "") . ($c_grup > 0 ? ", $c_grup grup baru" : "") . ($c_shift > 0 ? ", $c_shift shift baru" : "") . ($c_agt > 0 ? ", $c_agt anggota masuk master grup" : "") . $bon_msg . $sync_msg . "."];
+                        $redirect = "?page=rkk";
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ===== PREVIEW =====
+$preview = null;
+if (!$alert && $step === 'preview' && !empty($_FILES['fexcel']['tmp_name'])) {
+    $sheets = rk_read_any($_FILES['fexcel']['tmp_name']);
+    if ($sheets === false || empty($sheets)) {
+        $needzip = (strtolower(pathinfo($_FILES['fexcel']['name'] ?? '', PATHINFO_EXTENSION)) === 'xlsx' && !class_exists('ZipArchive'));
+        $alert = $needzip
+            ? ["icon" => "error", "title" => "PHP ZIP Mati", "text" => "File .xlsx butuh extension php_zip. Buka php.ini, hapus titik-koma di depan extension=zip, lalu restart Apache/XAMPP."]
+            : ["icon" => "error", "title" => "Gagal Baca", "text" => "File tidak bisa dibaca (harus .xlsx atau .xls hasil export aplikasi). Tutup dulu file Excel-nya bila sedang dibuka. Info file: " . rx_diag_file($_FILES['fexcel']['tmp_name'], $_FILES['fexcel']['name'] ?? '')];
+    } else {
+        $plan = ['rows' => [], 'skipped' => []]; $real = ['rows' => [], 'skipped' => []]; $title = '';
+        $raw_plan = null; $raw_satuan = null;
+        foreach ($sheets as $sname => $rows) {
+            $up = strtoupper($sname);
+            if (strpos($up, 'RENCANA') !== false || strpos($up, 'PERENCANA') !== false) { $plan = rk_extract_kelola($rows, $koneksi); $raw_plan = $rows; }
+            elseif (strpos($up, 'REALISASI') !== false || strpos($up, 'REAL') !== false) $real = rk_extract_kelola($rows, $koneksi);
+            if (stripos($sname, 'BONL') !== false || stripos($sname, 'BONEL') !== false) $raw_satuan = $rows;
+            if ($title === '' && isset($rows[1][1])) $title = trim((string)$rows[1][1]);
+        }
+        if (empty($plan['rows']) && empty($real['rows'])) {
+            $fb = [];
+            foreach ($sheets as $sn => $rw) if (stripos($sn, 'BONL') === false && stripos($sn, 'BONEL') === false) $fb[] = $rw;
+            if (isset($fb[0])) { $plan = rk_extract_kelola($fb[0], $koneksi); $raw_plan = $fb[0]; }
+            if (isset($fb[1])) $real = rk_extract_kelola($fb[1], $koneksi);
+        }
+        if ($raw_plan === null) {
+            $vals0 = array_values($sheets);
+            if (isset($vals0[0])) $raw_plan = $vals0[0];
+        }
+        // Boneless: footer sheet rencana + sheet satuan (tidak masuk kelola)
+        $bon = rk_extract_boneless($raw_plan);
+        $bon['satuan'] = ($raw_satuan !== null) ? rk_extract_satuan($raw_satuan) : [];
+        $skipped_all = array_merge(
+            array_map(function($s) { $s['sheet'] = 'PERENCANAAN'; return $s; }, $plan['skipped']),
+            array_map(function($s) { $s['sheet'] = 'REALISASI'; return $s; }, $real['skipped'])
+        );
+        $plan = $plan['rows']; $real = $real['rows'];
+        $date = rx_parse_id_date($title);
+        // Gabung per nama (kunci: nama normal)
+        $merged = [];
+        foreach ($plan as $r) {
+            $k = mb_strtolower(rx_norm_name($r['nama']));
+            if (!isset($merged[$k])) $merged[$k] = ['nama' => $r['nama'], 'plan' => null, 'real' => null];
+            $merged[$k]['plan'] = $r;
+        }
+        foreach ($real as $r) {
+            $k = mb_strtolower(rx_norm_name($r['nama']));
+            if (!isset($merged[$k])) $merged[$k] = ['nama' => $r['nama'], 'plan' => null, 'real' => null];
+            $merged[$k]['real'] = $r;
+        }
+        // Aturan denda + toleransi
+        $dq = $koneksi->query("SELECT * FROM tb_denda LIMIT 1");
+        $dd = $dq ? $dq->fetch_assoc() : [];
+        $denda = ['masuk' => (float)($dd['denda_masuk'] ?? 0), 'ist_keluar' => (float)($dd['denda_istirahat_keluar'] ?? 0),
+            'ist_masuk' => (float)($dd['denda_istirahat_masuk'] ?? 0), 'pulang' => (float)($dd['denda_pulang'] ?? 0),
+            'tdk' => (float)($dd['denda_tidak_lengkap'] ?? 0)];
+        $tq = $koneksi->query("SELECT * FROM tb_toleransi LIMIT 1");
+        $td = $tq ? $tq->fetch_assoc() : [];
+        $tol = ['masuk' => (int)($td['toleransi_masuk'] ?? 10), 'ist_keluar' => (int)($td['toleransi_istirahat_keluar'] ?? 5),
+            'ist_masuk' => (int)($td['toleransi_istirahat_masuk'] ?? 10), 'pulang' => (int)($td['toleransi_pulang'] ?? 5)];
+        $rows = [];
+        $qdd = $koneksi->query("SELECT MIN(id_departmen) AS m FROM ms_departmen");
+        $pv_dept = ($qdd && ($rdd = $qdd->fetch_assoc()) && $rdd['m']) ? (int)$rdd['m'] : 0;
+        $qss = $koneksi->query("SELECT MIN(id_sub_department) AS m FROM ms_sub_department");
+        $pv_sub = ($qss && ($rss = $qss->fetch_assoc()) && $rss['m']) ? (int)$rss['m'] : 0;
+        foreach ($merged as $m) {
+            $base = $m['plan'] ?: $m['real'];
+            $nama = $base['nama'];
+            $g_raw = ($m['plan'] ? $m['plan']['g_raw'] : '') ?: ($m['real'] ? $m['real']['g_raw'] : '');
+            $shift = rk_find_shift($koneksi, $g_raw);
+            $shift_baru = '';
+            if (!$shift) {
+                // 2026-11-16: rentang "7-19" -> tawarkan "(baru)" dgn jam pulang
+                // eksplisit (bukan +12); jam tunggal tetap "(baru)" 12 jam.
+                $rg = rx_parse_range($g_raw);
+                if ($rg) {
+                    $shift_baru = $rg['in'] . '-' . $rg['out'];
+                } else {
+                    $st = rx_frac_to_time($g_raw);
+                    if ($st !== '' && $st !== '00:00:00') $shift_baru = substr($st, 0, 5);
+                }
+                $shift = rk_match_shift($koneksi, $g_raw); // fallback tampilan
+            }
+            $match = rx_match_karyawan($koneksi, $nama);
+            // Department ikut master; Posisi ikut teks Excel (cocok -> kepilih, baru -> opsi "(baru)" + auto-create).
+            // Bila department belum ketemu tapi posisinya baru -> department ikut teks posisi (opsi "(baru)" + auto-create).
+            $dep_id = $pv_dept; $sub_id = $pv_sub; $posisi_baru = ''; $dept_baru = '';
+            $pos_txt0 = trim($base['posisi'] ?? '');
+            $sid0 = ($pos_txt0 !== '') ? rx_lookup_id($koneksi, 'ms_sub_department', 'nama_sub_department', $pos_txt0) : 0;
+            if ($match) {
+                $qm = $koneksi->query("SELECT id_departmen, id_sub_department FROM ms_karyawan WHERE id_karyawan='" . (int)$match['id_karyawan'] . "' LIMIT 1");
+                if ($qm && ($rm = $qm->fetch_assoc())) {
+                    if ((int)($rm['id_departmen'] ?? 0) > 0) $dep_id = (int)$rm['id_departmen'];
+                    if ($sid0 > 0) { $sub_id = $sid0; }
+                    elseif ($pos_txt0 !== '') { $posisi_baru = $pos_txt0; }
+                    else { $sub_id = 0; } // Excel kosong -> kosong, jangan ngarang
+                } elseif ($sid0 > 0) { $sub_id = $sid0; }
+                elseif ($pos_txt0 !== '') { $posisi_baru = $pos_txt0; }
+            } else {
+                if ($sid0 > 0) {
+                    $sub_id = $sid0;
+                    $d0 = rx_sub_dept($koneksi, $sid0);
+                    if ($d0 > 0) $dep_id = $d0;
+                } elseif ($pos_txt0 !== '') {
+                    $posisi_baru = $pos_txt0; // belum ada di master -> dibuat otomatis saat simpan
+                } else { $sub_id = 0; } // Excel kosong -> kosong, jangan ngarang
+            }
+            if ($dep_id <= 0 && $posisi_baru !== '') $dept_baru = $posisi_baru; // dept ngikutin posisi baru di Excel
+            $has_real = $m['real'] && (rx_valid_time($m['real']['h_raw']) || rx_valid_time($m['real']['jam_pulang']));
+            $jam_masuk = $m['real'] ? rx_frac_to_time($m['real']['h_raw']) : '';
+            $jam_pulang = $m['real'] ? $m['real']['jam_pulang'] : '';
+            $pot = ['telat' => 0, 'ist_awal' => 0, 'ist_telat' => 0, 'pulang' => 0, 'tdk' => 0, 'lainnya' => 0];
+            if ($has_real && $shift) {
+                $ra_m = $jam_masuk; $ra_p = $jam_pulang;
+                if (rx_valid_time($ra_m) && rx_valid_time($shift['jam_masuk']) && rx_day_diff($ra_m, $shift['jam_masuk']) > $tol['masuk'] * 60) $pot['telat'] = $denda['masuk'];
+                if (rx_valid_time($ra_p) && rx_valid_time($shift['jam_keluar']) && rx_day_diff($shift['jam_keluar'], $ra_p) > $tol['pulang'] * 60) $pot['pulang'] = $denda['pulang'];
+                $hm = rx_valid_time($ra_m); $hp = rx_valid_time($ra_p);
+                if ($hm xor $hp) $pot['tdk'] = $denda['tdk'];
+            }
+            $excel_pot = $m['real'] ? (float)$m['real']['pot_excel'] : 0;
+            $section = ($m['plan'] ? $m['plan']['section'] : '') ?: ($m['real'] ? $m['real']['section'] : '');
+            $os_txt0 = trim($base['osdhk'] ?? ''); $gol_txt0 = trim($base['golongan'] ?? '');
+            $os_baru = (!$match && $os_txt0 !== '' && rx_lookup_id($koneksi, 'ms_os_dhk', 'OS_DHK', $os_txt0) <= 0) ? $os_txt0 : '';
+            $gol_baru = (!$match && $gol_txt0 !== '' && rx_lookup_id($koneksi, 'ms_golongan', 'golongan', $gol_txt0) <= 0) ? $gol_txt0 : '';
+            $rows[] = [
+                'nama' => $nama, 'section' => $section,
+                'dirty' => !empty($base['dirty']),
+                'karyawan_id' => $match ? (int)$match['id_karyawan'] : 0,
+                'karyawan_nama' => $match ? $match['nama_karyawan'] : '',
+                'grup_baru' => trim($section) !== '' && !rk_find_grup($koneksi, $section),
+                'shift_id' => $shift ? (int)$shift['id_jadwal'] : 0,
+                'shift' => $shift,
+                'shift_baru' => $shift_baru,
+                'jam_kerja' => rx_frac_to_hours($g_raw),
+                'upah' => $m['plan'] ? (float)$m['plan']['upah_excel'] : (float)($m['real']['upah_excel'] ?? 0),
+                'osdhk' => $base['osdhk'] ?? '',
+                'golongan' => $base['golongan'] ?? '',
+                'posisi' => $base['posisi'] ?? '',
+                'posisi_baru' => $posisi_baru,
+                'dept_baru' => $dept_baru,
+                'osdhk_baru' => $os_baru,
+                'golongan_baru' => $gol_baru,
+                'dept_id' => $dep_id,
+                'sub_id' => $sub_id,
+                'in_plan' => !empty($m['plan']),
+                'has_real' => $has_real,
+                'jam_masuk' => $jam_masuk,
+                'jam_pulang' => $jam_pulang,
+                'hasil' => $m['real']['hasil'] ?? '',
+                'lembur' => $m['real'] ? (float)$m['real']['lembur_excel'] : 0,
+                'pot_split' => $pot,
+                'pot_split_total' => array_sum($pot),
+                'pot_excel' => $excel_pot,
+                'upah_dibayar_excel' => $m['real'] ? (float)$m['real']['dibayar_excel'] : 0,
+            ];
+        }
+        $_SESSION['rx_import'] = ['date' => $date, 'title' => $title, 'rows' => $rows, 'skipped' => $skipped_all, 'boneless' => $bon];
+        $preview = ['fname' => $_FILES['fexcel']['name'], 'title' => $title, 'date' => $date, 'rows' => $rows, 'skipped' => $skipped_all, 'boneless' => $bon];
+    }
+}
+$list_jadwal_prev = $koneksi->query("SELECT * FROM tb_jadwal ORDER BY id_jadwal ASC");
+$jadwal_opts = [];
+while ($list_jadwal_prev && ($jj = $list_jadwal_prev->fetch_assoc())) $jadwal_opts[] = $jj;
+$dept_opts = [];
+$qd_prev = $koneksi->query("SELECT * FROM ms_departmen ORDER BY nama_departmen ASC");
+while ($qd_prev && ($dd = $qd_prev->fetch_assoc())) $dept_opts[] = $dd;
+$sub_opts = [];
+$qs_prev = $koneksi->query("SELECT * FROM ms_sub_department ORDER BY nama_sub_department ASC");
+while ($qs_prev && ($ss = $qs_prev->fetch_assoc())) $sub_opts[] = $ss;
+?>
+<div class="max-w-5xl mx-auto px-2 sm:px-6 lg:px-8 mt-4 sm:mt-10 mb-10">
+    <div class="bg-white shadow-xl border border-gray-200 rounded-2xl overflow-hidden">
+        <div class="bg-gradient-to-r from-emerald-600 to-emerald-700 px-5 sm:px-8 py-5 sm:py-6">
+            <h3 class="text-xl sm:text-2xl font-extrabold text-white m-0 tracking-tight flex items-center">
+                <i class="fas fa-file-excel mr-3"></i> Import Excel Absensi Harian
+            </h3>
+            <p class="text-emerald-100 text-xs sm:text-sm mt-1">Section di Excel = grup (dibuat otomatis bila belum ada). Upload → preview → simpan ke RKK saja (Realisasi dibuat setelah RKK di-approve).</p>
+        </div>
+        <div class="p-5 sm:p-8">
+            <div class="mb-5">
+                <a href="?page=rkk" class="inline-flex justify-center items-center px-5 py-2.5 border border-gray-300 shadow-sm text-sm font-bold rounded-xl text-gray-700 bg-white hover:bg-gray-50 transition">
+                    <i class="fas fa-arrow-left mr-2"></i> Kembali
+                </a>
+            </div>
+            <?php if ($preview): ?>
+            <div class="mb-4 p-4 bg-emerald-50 border border-emerald-100 rounded-lg text-sm">
+                <strong>File:</strong> <?= htmlspecialchars($preview['fname']); ?> | <strong>Judul:</strong> <?= htmlspecialchars($preview['title']); ?><br>
+                <strong>Tanggal terdeteksi:</strong> <?= htmlspecialchars($preview['date'] ?: '(tidak terbaca dari judul — isi manual di bawah)'); ?> |
+                <strong><?= count($preview['rows']); ?></strong> baris karyawan
+            </div>
+            <?php $bon_prev = $preview['boneless'] ?? null; ?>
+            <?php if ($bon_prev && ((int)($bon_prev['mobil'] ?? 0) > 0 || !empty($bon_prev['items']) || !empty($bon_prev['satuan']))): ?>
+            <div class="mb-4 p-4 bg-purple-50 border border-purple-200 rounded-lg text-sm">
+                <strong>Boneless terdeteksi:</strong> <?= (int)$bon_prev['mobil']; ?> mobil
+                • <?= count($bon_prev['items']); ?> item
+                • <?= count($bon_prev['satuan']); ?> karyawan satuan
+                — otomatis tersimpan ke halaman Boneless (tidak masuk kelola).
+            </div>
+            <?php endif; ?>
+            <form method="POST" id="rx_commit_form">
+                <input type="hidden" name="rx_step" value="commit">
+                <input type="hidden" name="rx_payload" id="rx_payload" value="">
+                <div class="mb-4 max-w-xs">
+                    <label class="block text-sm font-bold text-gray-700 mb-2">Tanggal RKK</label>
+                    <input type="date" name="rx_date" value="<?= htmlspecialchars($preview['date'] ?: date('Y-m-d')); ?>" required class="w-full px-4 py-2.5 rounded-xl border border-gray-300 text-sm">
+                </div>
+                <div class="rounded-lg border border-gray-300 mb-4" style="overflow-x:auto;">
+                    <table class="text-left border-collapse" style="min-width:1500px;width:100%;">
+                        <thead class="bg-gray-100">
+                            <tr style="white-space:nowrap;">
+                                <th class="py-2 px-3 w-10"><input type="checkbox" id="rx_all" checked style="width:16px;height:16px;"></th>
+                                <th class="py-2 px-3 text-xs font-bold text-gray-700 uppercase w-12">No</th>
+                                <th class="py-2 px-3 text-xs font-bold text-gray-700 uppercase">Nama (Excel)</th>
+                                <th class="py-2 px-3 text-xs font-bold text-gray-700 uppercase text-right">Upah</th>
+                                <th class="py-2 px-3 text-xs font-bold text-gray-700 uppercase">Grup</th>
+                                <th class="py-2 px-3 text-xs font-bold text-gray-700 uppercase">Status</th>
+                                <th class="py-2 px-3 text-xs font-bold text-gray-700 uppercase">Shift</th>
+                                <th class="py-2 px-3 text-xs font-bold text-gray-700 uppercase">Posisi</th>
+                                <th class="py-2 px-3 text-xs font-bold text-gray-700 uppercase">Department</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        <?php foreach ($preview['rows'] as $idx => $r): ?>
+                            <tr class="border-t border-gray-200">
+                                <td class="py-2 px-3"><input type="checkbox" class="rx_sel" name="rx_sel[]" value="<?= $idx; ?>" <?= $r['dirty'] ? '' : 'checked'; ?> style="width:16px;height:16px;"></td>
+                                <td class="py-2 px-3 text-sm text-gray-500"><?= $idx + 1; ?></td>
+                                <td class="py-2 px-3 text-sm font-bold"><?= htmlspecialchars($r['nama']); ?>
+                                    <?php if ($r['karyawan_id'] > 0): ?><div class="text-[11px] font-normal text-gray-400"><?= htmlspecialchars($r['karyawan_nama']); ?></div><?php endif; ?>
+                                    <div class="text-[11px] font-normal text-gray-400"><?= htmlspecialchars(trim(($r['osdhk'] . ' / ' . $r['golongan'] . ' / ' . $r['posisi']), ' /')); ?>
+                                        <?php if (!empty($r['osdhk_baru'])): ?><span class="font-bold text-purple-700">OS baru</span><?php endif; ?>
+                                        <?php if (!empty($r['golongan_baru'])): ?><span class="font-bold text-purple-700">Gol baru</span><?php endif; ?>
+                                    </div>
+                                </td>
+                                <td class="py-2 px-3"><input type="number" name="up_<?= $idx; ?>" value="<?= (int)$r['upah']; ?>" min="0" class="w-28 px-2 py-1.5 border border-gray-300 rounded-lg text-sm text-right"></td>
+                                <td class="py-2 px-3 text-sm">
+                                    <?= $r['section'] !== '' ? htmlspecialchars($r['section']) : '<span class="text-gray-400 italic">Tanpa Grup</span>'; ?>
+                                    <?php if ($r['grup_baru']): ?><div><span class="px-2 py-0.5 text-[11px] font-bold rounded-full bg-purple-100 text-purple-800">Grup baru</span></div><?php endif; ?>
+                                </td>
+                                <td class="py-2 px-3 text-sm">
+                                    <?php if ($r['karyawan_id'] > 0): ?>
+                                        <span class="px-2 py-0.5 text-[11px] font-bold rounded-full bg-green-100 text-green-800">Cocok</span>
+                                    <?php else: ?>
+                                        <span class="px-2 py-0.5 text-[11px] font-bold rounded-full bg-blue-100 text-blue-800">Baru dibuat</span>
+                                    <?php endif; ?>
+                                    <?php if ($r['dirty']): ?><div><span class="px-2 py-0.5 text-[11px] font-bold rounded-full bg-amber-100 text-amber-800">Baris kotor</span></div><?php endif; ?>
+                                    <?php if (!$r['in_plan']): ?><div><span class="px-2 py-0.5 text-[11px] font-bold rounded-full bg-gray-200 text-gray-600">Tanpa rencana</span></div><?php endif; ?>
+                                </td>
+                                <td class="py-2 px-3">
+                                    <select name="sh_<?= $idx; ?>" class="px-2 py-1.5 border border-gray-300 rounded-lg text-sm bg-white">
+                                        <?php foreach ($jadwal_opts as $jo): ?>
+                                            <option value="<?= $jo['id_jadwal']; ?>" <?= (empty($r['shift_baru']) && (int)$jo['id_jadwal'] === (int)$r['shift_id']) ? 'selected' : ''; ?>><?= htmlspecialchars($jo['keterangan']); ?></option>
+                                        <?php endforeach; ?>
+                                        <?php if (!empty($r['shift_baru'])): ?><option value="baru:<?= htmlspecialchars($r['shift_baru']); ?>" selected>Jam <?= htmlspecialchars($r['shift_baru']); ?> (baru)</option><?php endif; ?>
+                                    </select>
+                                    <?php if (!empty($r['shift_baru'])): ?><?php
+                                        // 2026-11-16: durasi "(baru)" ikut rentang (7 jam / 12 jam),
+                                        // bukan selalu 12 jam.
+                                        $dur_txt = '12 jam';
+                                        if (strpos($r['shift_baru'], '-') !== false) {
+                                            $pp = explode('-', $r['shift_baru']);
+                                            $aa = strtotime(trim($pp[0]) . ':00'); $bb = strtotime(trim($pp[1]) . ':00');
+                                            if ($aa !== false && $bb !== false) {
+                                                if ($bb <= $aa) $bb += 86400;
+                                                $hh = ($bb - $aa) / 3600;
+                                                $dur_txt = (fmod($hh, 1) == 0) ? ((int)$hh . ' jam') : (rtrim(rtrim(number_format($hh, 1), '0'), '.') . ' jam');
+                                            }
+                                        }
+                                    ?><div class="text-[11px] font-bold text-purple-700 mt-1">Shift jam <?= htmlspecialchars($r['shift_baru']); ?> baru → otomatis dibuat (<?= $dur_txt; ?>)</div><?php endif; ?>
+                                </td>
+                                <td class="py-2 px-3">
+                                    <select name="ps_<?= $idx; ?>" class="rx_pos px-2 py-1.5 border border-gray-300 rounded-lg text-sm bg-white">
+                                        <option value="0"<?= ((int)($r['sub_id'] ?? 0) === 0 && empty($r['posisi_baru']) ? ' selected' : ''); ?>>- Kosong -</option>
+                                        <?php foreach ($sub_opts as $so): ?>
+                                            <option value="<?= $so['id_sub_department']; ?>" data-dept="<?= (int)($so['id_departmen'] ?? 0); ?>" <?= (empty($r['posisi_baru']) && (int)$so['id_sub_department'] === (int)($r['sub_id'] ?? 0)) ? 'selected' : ''; ?>><?= htmlspecialchars($so['nama_sub_department']); ?></option>
+                                        <?php endforeach; ?>
+                                        <?php if (!empty($r['posisi_baru'])): ?><option value="<?= htmlspecialchars($r['posisi_baru']); ?>" selected><?= htmlspecialchars($r['posisi_baru']); ?> (baru)</option><?php endif; ?>
+                                    </select>
+                                    <?php if (!empty($r['posisi_baru'])): ?><div class="text-[11px] font-bold text-purple-700 mt-1">“<?= htmlspecialchars($r['posisi_baru']); ?>” baru → otomatis dibuat</div><?php endif; ?>
+                                </td>
+                                <td class="py-2 px-3">
+                                    <select name="dp_<?= $idx; ?>" class="rx_dept px-2 py-1.5 border border-gray-300 rounded-lg text-sm bg-white">
+                                        <?php foreach ($dept_opts as $do): ?>
+                                            <option value="<?= $do['id_departmen']; ?>" <?= (empty($r['dept_baru']) && (int)$do['id_departmen'] === (int)($r['dept_id'] ?? 0)) ? 'selected' : ''; ?>><?= htmlspecialchars($do['nama_departmen']); ?></option>
+                                        <?php endforeach; ?>
+                                        <?php if (!empty($r['dept_baru'])): ?><option value="<?= htmlspecialchars($r['dept_baru']); ?>" selected><?= htmlspecialchars($r['dept_baru']); ?> (baru)</option><?php endif; ?>
+                                    </select>
+                                    <?php if (!empty($r['dept_baru'])): ?><div class="text-[11px] font-bold text-purple-700 mt-1">“<?= htmlspecialchars($r['dept_baru']); ?>” baru → otomatis dibuat</div><?php endif; ?>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+                <?php if (!empty($preview['skipped'])): ?>
+                <div class="mb-4 p-3 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-500">
+                    <strong>Dilewati otomatis (<?= count($preview['skipped']); ?> baris):</strong>
+                    <?= htmlspecialchars(implode(', ', array_map(function($s) { return $s['nama'] . ' (baris ' . $s['row'] . (isset($s['alasan']) ? ' — ' . $s['alasan'] : '') . ')'; }, $preview['skipped']))); ?>
+                </div>
+                <?php endif; ?>
+                <div class="flex flex-col sm:flex-row gap-3">
+                    <button type="submit" class="inline-flex justify-center items-center px-6 py-2.5 text-sm font-bold rounded-xl shadow-md text-white bg-emerald-600 hover:bg-emerald-700 transition">
+                        <i class="fas fa-check mr-2"></i> Simpan ke RKK
+                    </button>
+                    <a href="?page=rkk&aksi=import" class="inline-flex justify-center items-center px-5 py-2.5 border border-gray-300 text-sm font-bold rounded-xl text-gray-700 bg-white hover:bg-gray-50 transition">Ulangi</a>
+                </div>
+            </form>
+            <script>
+                document.getElementById('rx_all').addEventListener('change', function() {
+                    document.querySelectorAll('.rx_sel').forEach(function(c) { c.checked = document.getElementById('rx_all').checked; });
+                });
+                // Posisi ikut department: pilihan posisi difilter per baris
+                function rxFilterRow(tr) {
+                    var d = tr.querySelector('.rx_dept');
+                    var p = tr.querySelector('.rx_pos');
+                    if (!d || !p) return;
+                    var dv = d.value;
+                    Array.prototype.forEach.call(p.options, function(o) {
+                        if (!o.value) return;
+                        var od = o.getAttribute('data-dept');
+                        o.hidden = (od && od !== '0' && dv && od !== dv);
+                    });
+                    var sel = p.selectedOptions && p.selectedOptions[0];
+                    if (sel && sel.hidden) p.selectedIndex = 0;
+                }
+                document.querySelectorAll('.rx_dept').forEach(function(d) {
+                    d.addEventListener('change', function() { rxFilterRow(d.closest('tr')); });
+                });
+                document.querySelectorAll('#rx_all, .rx_sel, table tbody tr').forEach(function() {});
+                document.querySelectorAll('table tbody tr').forEach(function(tr) { rxFilterRow(tr); });
+                // Packing anti max_input_vars: kirim baris tercentang sebagai 1 JSON, input per-baris di-disable agar tidak ikut ter-post
+                document.getElementById('rx_commit_form').addEventListener('submit', function() {
+                    var rows = [];
+                    document.querySelectorAll('.rx_sel:checked').forEach(function(c) {
+                        var idx = c.value;
+                        function v(pref) { var el = document.querySelector('[name="' + pref + idx + '"]'); return el ? el.value : ''; }
+                        rows.push({ i: parseInt(idx, 10), sh: v('sh_'), up: v('up_'), dp: v('dp_'), ps: v('ps_') });
+                    });
+                    document.getElementById('rx_payload').value = JSON.stringify(rows);
+                    document.querySelectorAll('.rx_sel, select[name^="sh_"], input[name^="up_"], select[name^="dp_"], select[name^="ps_"]').forEach(function(el) { el.disabled = true; });
+                });
+            </script>
+            <?php else: ?>
+            <form method="POST" enctype="multipart/form-data" class="max-w-xl">
+                <input type="hidden" name="rx_step" value="preview">
+                <div class="mb-4">
+                    <label class="block text-sm font-bold text-gray-700 mb-2">File Excel (.xlsx / .xls hasil export)</label>
+                    <input type="file" name="fexcel" accept=".xlsx,.xls" required class="w-full px-4 py-2.5 rounded-xl border border-gray-300 text-sm bg-white">
+                </div>
+                <button type="submit" class="inline-flex justify-center items-center px-6 py-2.5 text-sm font-bold rounded-xl shadow-md text-white bg-emerald-600 hover:bg-emerald-700 transition">
+                    <i class="fas fa-upload mr-2"></i> Upload &amp; Preview
+                </button>
+            </form>
+            <div class="mt-6 p-4 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-600 leading-relaxed">
+                <strong>Cara kerja:</strong> tanggal diambil dari judul baris 1 (bisa dikoreksi di preview). Section di Excel = grup — kalau belum ada di master, otomatis dibuatkan.
+                Shift ditebak dari kolom JAM KERJA (bisa diubah per baris), Upah dari kolom UPAH (kalau ada). Shift yang belum ada di master otomatis dibuatkan (12 jam). Department &amp; Posisi ikut master/tebakan Excel dan bisa diubah per baris — pilihan Posisi otomatis ikut Department. Posisi yang belum ada di master otomatis dibuatkan saat simpan; yang kosong di Excel disimpan kosong (tidak diisi default). Rekap boneless di bawah + sheet BONLESS otomatis masuk halaman Boneless (tidak masuk kelola).
+                Nama yang tidak cocok otomatis dibuatkan karyawan baru (No. Absen = MAX+1). Anggota tiap section otomatis dimasukkan ke master grup (boleh rangkap di banyak grup). Baris kotor tetap diproses tapi tidak dicentang — cek manual.
+            </div>
+            <?php endif; ?>
+        </div>
+    </div>
+</div>
+
+<?php if ($alert): ?>
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+<script>
+Swal.fire({
+    icon: "<?= $alert['icon'] ?>",
+    title: "<?= $alert['title'] ?>",
+    text: "<?= $alert['text'] ?>",
+    confirmButtonColor: "#059669"
+}).then(() => {
+    <?php if ($redirect): ?>
+        window.location.href = "<?= $redirect ?>";
+    <?php endif; ?>
+});
+</script>
+<?php endif; ?>

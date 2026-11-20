@@ -1,0 +1,20 @@
+# Arsip / file besar (batas GitHub 100 MB per file)
+*.zip
+*.rar
+*.7z
+
+# Log & file runtime
+*.log
+sweep.lock
+assets/ledger_cache.tmp
+
+# Sampah editor / OS
+*.stackdump
+Thumbs.db
+desktop.ini
+
+# Tooling lokal
+.tempmediaStorage/
+.system_generated/
+.agents/
+.gemini/

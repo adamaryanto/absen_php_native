@@ -1,0 +1,675 @@
+<?php
+if (isset($_GET['id'])) {
+  $idrkk = isset($_GET['id']) ? intval($_GET['id']) : 0;
+
+  if ($idrkk <= 0) {
+    echo '<!DOCTYPE html>
+    <html>
+    <head>
+        <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    </head>
+    <body>
+        <script>
+            Swal.fire({
+                icon: "error",
+                title: "ID Tidak Valid",
+                text: "ID RKK tidak ditemukan atau tidak sah!",
+                confirmButtonColor: "#2563eb"
+            }).then(() => {
+                window.location.href = "?page=rkk";
+            });
+        </script>
+    </body>
+    </html>';
+    exit;
+  }
+  $tampildetail = $koneksi->query("select * from tb_rkk where id_rkk = '$idrkk' ");
+  $datadetail = $tampildetail->fetch_assoc();
+  $datatglrkk = $datadetail['tgl_rkk'];
+  $dataketerangan = $datadetail['keterangan'];
+  $datadetailrkk   = $datadetail['detail_rkk'];
+  $datajamkerja   = $datadetail['jam_kerja'];
+  $datastatusrkk   = $datadetail['status_rkk'];
+
+  $tampil = $koneksi->query("SELECT 
+    A.*, 
+    -- Jika id_karyawan 0, tampilkan '-', jika tidak tampilkan no_absen asli
+    IF(A.id_karyawan = 0, '-', B.no_absen) as no_absen_tampil, 
+    -- Jika id_karyawan 0, ambil dari kolom manual, jika tidak ambil dari master
+    IF(A.id_karyawan = 0, A.nama_karyawan_manual, B.nama_karyawan) as nama_tampil,
+    JB.jabatan as nama_sub_department, 
+    D.nama_departmen, 
+    C.tgl_rkk, 
+    O.OS_DHK as label_os,
+    G.golongan as label_gol,
+    GB.nama_grup as label_grup,
+    J.keterangan as nama_shift,
+    J.jam_masuk,
+    J.jam_keluar,
+    CASE WHEN A.status_rkk = 'Digantikan' THEN 0 ELSE A.upah END as upahkaryawan, 
+    A.potongan_telat, 
+    A.potongan_istirahat, 
+    A.potongan_lainnya,
+    -- Subquery untuk pengganti tetap menggunakan logika ID (asumsi pengganti harus dari database)
+    (SELECT K3.nama_karyawan 
+     FROM tb_rkk_update U1 
+     JOIN tb_rkk_update U2 ON U1.id_rkk_detail = U2.id_rkk_detail 
+     JOIN ms_karyawan K3 ON U2.id_karyawan = K3.id_karyawan 
+     JOIN tb_rkk_detail RD2 ON U1.id_rkk_detail = RD2.id_rkk_detail
+     WHERE U1.id_karyawan = A.id_karyawan 
+     AND U1.status = 'Pengganti' 
+     AND U2.status = 'Digantikan' 
+     AND RD2.id_rkk = A.id_rkk
+     LIMIT 1) as menggantikan,
+    (SELECT K4.nama_karyawan 
+     FROM tb_rkk_update U3 
+     JOIN tb_rkk_update U4 ON U3.id_rkk_detail = U4.id_rkk_detail 
+     JOIN ms_karyawan K4 ON U4.id_karyawan = K4.id_karyawan 
+     WHERE U3.id_rkk_detail = A.id_rkk_detail 
+     AND U3.status = 'Digantikan' 
+     AND U4.status = 'Pengganti' 
+     LIMIT 1) as digantikan_oleh
+FROM tb_rkk_detail A 
+LEFT JOIN ms_karyawan B ON A.id_karyawan = B.id_karyawan
+LEFT JOIN tb_rkk C ON A.id_rkk = C.id_rkk
+LEFT JOIN ms_departmen D ON A.id_departmen = D.id_departmen
+LEFT JOIN ms_jabatan JB ON B.id_jabatan = JB.id_jabatan 
+LEFT JOIN tb_jadwal J ON A.id_jadwal = J.id_jadwal 
+LEFT JOIN ms_os_dhk O ON B.id_os_dhk = O.id_os_dhk
+LEFT JOIN ms_golongan G ON B.id_golongan = G.id_golongan
+LEFT JOIN ms_grup_borongan GB ON A.id_grup = GB.id_grup
+LEFT JOIN (SELECT id_grup, MIN(id_rkk_detail) AS g_ord FROM tb_rkk_detail WHERE id_rkk = '$idrkk' AND id_grup IS NOT NULL GROUP BY id_grup) GO ON GO.id_grup = A.id_grup
+WHERE A.id_rkk = '$idrkk'
+ORDER BY (GB.nama_grup IS NULL), GO.g_ord ASC, A.id_rkk_detail ASC
+");
+} else {
+  $datatglrkk = "";
+  $dataketerangan = "";
+  $datadetailrkk   = "";
+  $datajamkerja   = "";
+  $datastatusrkk   = 3;
+}
+
+// HAPUS BANYAK (checkbox) — hanya bila belum approve
+if ($idrkk > 0 && $datastatusrkk < 2 && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pilih'])) {
+    $ids = array_filter(array_map('intval', (array)$_POST['pilih']));
+    if (!empty($ids)) {
+        $in = implode(',', $ids);
+        $koneksi->query("DELETE FROM tb_rkk_detail WHERE id_rkk = '$idrkk' AND id_rkk_detail IN ($in)");
+        echo "<script>window.location.href='?page=rkk&aksi=kelola&id=$idrkk&msg=deleted';</script>";
+    } else {
+        echo "<script>window.location.href='?page=rkk&aksi=kelola&id=$idrkk';</script>";
+    }
+    exit;
+}
+
+if ($datastatusrkk == 3) {
+  $status = "Hidden";
+} elseif ($datastatusrkk == 2) {
+  if ($_SESSION['role'] != "Owner") {
+    $status = "Hidden";
+  } else {
+    $status = "";
+  }
+} elseif ($datastatusrkk == 1) {
+  if ($_SESSION['role'] != "Owner") {
+    $status = "Hidden";
+  } else {
+    $status = "";
+  }
+} else {
+  $status = "";
+}
+
+?>
+
+<div class="container-fluid px-3 mt-4 mb-4">
+  <div class="card border-0 shadow-sm rounded-xl overflow-hidden bg-white">
+    <div class="border-b border-gray-200 py-4 px-4 md:px-5 bg-white flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+      <h3 class="text-xl font-bold text-blue-600 m-0"><i class="fas fa-info-circle mr-2"></i> Daftar Rencana Kerja</h3>
+
+      <div class="flex flex-wrap items-center gap-2 w-full md:w-auto">
+        <a href="?page=rkk" class="inline-flex items-center bg-white hover:bg-gray-50 text-gray-700 border border-gray-300 text-[14px] md:text-base font-medium py-2 px-4 rounded shadow-sm transition-colors w-full md:w-auto justify-center">
+          <i class="fas fa-arrow-left mr-1.5"></i> Kembali
+        </a>
+        <?php if (in_array(strtolower($_SESSION['role'] ?? ''), ["owner", "admin master", "admin hr"], true)) : ?>
+          <?php if ($datastatusrkk == 1 || $datastatusrkk == 0) : ?>
+            <button type="button"
+              class="inline-flex items-center border-0 bg-emerald-600 hover:bg-emerald-700 text-white text-[14px] md:text-base font-medium py-2 px-4 rounded shadow-sm transition-colors w-full md:w-auto justify-center btn-header-action"
+              data-id="<?= $idrkk; ?>"
+              data-action="app"
+              data-text="Approve Rencana Kerja ini?">
+              <i class="fas fa-check-circle mr-1.5"></i> Approve
+            </button>
+          <?php elseif ($datastatusrkk == 2 || $datastatusrkk == 3) : ?>
+            <button type="button"
+              class="inline-flex items-center bg-rose-600 hover:bg-rose-700 text-white text-[14px] md:text-base font-medium py-2 px-4 rounded shadow-sm transition-colors w-full md:w-auto justify-center btn-header-action"
+              data-id="<?= $idrkk; ?>"
+              data-action="unapp"
+              data-text="Batalkan Approve Rencana Kerja ini?">
+              <i class="fas fa-times-circle mr-1.5"></i> Un-Approve
+            </button>
+          <?php endif; ?>
+        <?php endif; ?>
+
+        <?php if ($datastatusrkk < 2) : ?>
+          <a href="?page=rkk&aksi=karyawan&id=<?= $idrkk; ?>" class="inline-flex items-center bg-blue-600 hover:bg-blue-700 text-white text-[14px] md:text-base font-medium py-2 px-4 rounded shadow-sm transition-colors w-full md:w-auto justify-center">
+            <i class="fas fa-user-plus mr-1.5"></i> Tetapkan Karyawan
+          </a>
+          <a href="?page=rkk&aksi=importkelola&id=<?= $idrkk; ?>" class="inline-flex items-center bg-emerald-600 hover:bg-emerald-700 text-white text-[14px] md:text-base font-medium py-2 px-4 rounded shadow-sm transition-colors w-full md:w-auto justify-center">
+            <i class="fas fa-file-excel mr-1.5"></i> Import Excel
+          </a>
+        <?php endif; ?>
+      </div>
+    </div>
+
+    <div class="p-4 md:p-5 bg-gray-50 border-b border-gray-100">
+      <div class="row">
+        <div class="col-md-3 col-sm-12 mb-3 mb-md-0">
+          <label class="font-bold text-gray-700 text-sm">Tanggal:</label>
+          <input type="text" value="<?= date('d/m/Y', strtotime($datatglrkk)); ?>" readonly class="form-control text-base py-2" />
+        </div>
+
+        <div class="col-md-9 col-sm-12 mb-3 mb-md-0">
+          <label class="font-bold text-gray-700 text-sm">Keterangan:</label>
+          <input type="text" value="<?= $dataketerangan; ?>" readonly class="form-control text-base py-2" />
+        </div>
+      </div>
+    </div>
+
+    <div class="p-0">
+      <div class="px-3 md:px-4 py-4">
+        <div class="mb-3">
+          <input id="cariKaryawan" type="text" placeholder="Cari nama / posisi..." autocomplete="off"
+            class="w-full md:max-w-xs px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <form method="POST" id="formBulk">
+        <?php if ($datastatusrkk < 2) : ?>
+        <div class="mb-3 flex items-center gap-3 flex-wrap">
+          <label class="text-sm font-bold text-gray-700 flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" id="checkAll" style="width:16px;height:16px;cursor:pointer;"> Pilih semua
+          </label>
+          <span id="pilihCount" class="text-sm font-bold text-gray-500">0 dipilih</span>
+          <button type="button" id="btnHapusPilih" class="px-3 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded shadow-sm">Hapus yang Dipilih</button>
+        </div>
+        <?php endif; ?>
+        <div class="table-responsive rounded-lg border border-gray-800">
+          <table class="w-full text-left border-collapse table-modern min-w-[1600px]" id="tabel-rkk">
+          <tbody>
+            <?php
+            $no = 1;
+            $last_dept = null;
+            $show_bulk = ($datastatusrkk < 2);
+            // +1 kolom Upah (di antara Jam Pulang dan Aksi); kalau tidak diubah, baris pemisah grup jadi tidak selebar tabel.
+            $ncol = $show_bulk ? 13 : 12;
+            function rkk_grp_th($t, $bg, $extra = '') {
+              return "<th class=\"py-3 px-2 text-sm font-bold text-gray-700 uppercase$extra\" style=\"background:$bg;\">$t</th>";
+            }
+            while ($data = $tampil->fetch_assoc()) :
+              if (trim((string)($data['nama_tampil'] ?? '')) === '') continue;
+              $dept_now = !empty($data['label_grup']) ? strtoupper($data['label_grup']) : 'TANPA GRUP';
+              if ($dept_now !== $last_dept) :
+                $last_dept = $dept_now;
+                $no = 1;
+                $dept_esc = htmlspecialchars($dept_now, ENT_QUOTES);
+            ?>
+              <tr class="dept-separator" data-dept="<?= $dept_esc ?>">
+                <td colspan="<?= $ncol ?>" data-label="Bagian" style="background:#B2A1C6; font-weight:bold; text-transform:uppercase; padding:8px 4px;">
+                  <div style="display:flex;align-items:center;gap:8px;">
+                    <span style="flex:1;text-align:center;"><?= $dept_now ?></span>
+                    <?php if ($show_bulk) : ?>
+                    <button type="button" class="btn-hapus-grup" data-g="<?= $dept_esc ?>" style="background:#fff;color:#be123c;border:1px solid #be123c;border-radius:6px;padding:2px 10px;font-size:11px;font-weight:bold;cursor:pointer;white-space:nowrap;text-transform:none;">Hapus grup</button>
+                    <?php endif; ?>
+                  </div>
+                </td>
+              </tr>
+              <tr class="grp-header d-none d-md-table-row" data-dept="<?= $dept_esc ?>">
+                <?php if ($show_bulk) : ?>
+                <?= rkk_grp_th('', '#D9D9D9') ?>
+                <?php endif; ?>
+                <?= rkk_grp_th('No', '#D9D9D9') ?>
+                <?= rkk_grp_th('Nama Sesuai KTP', '#D9D9D9') ?>
+                <?= rkk_grp_th('Paraf Pekerja', '#D9D9D9') ?>
+                <?= rkk_grp_th('OS/DHK', '#D9D9D9') ?>
+                <?= rkk_grp_th('Golongan', '#D9D9D9') ?>
+                <?= rkk_grp_th('Posisi', '#D9D9D9') ?>
+                <?= rkk_grp_th('Jam Kerja', '#D9D9D9') ?>
+                <?= rkk_grp_th('Jam Masuk', '#D9D9D9') ?>
+                <?= rkk_grp_th('Istirahat<br>Masuk', '#D9D9D9') ?>
+                <?= rkk_grp_th('Jam Pulang', '#D9D9D9') ?>
+                <?= rkk_grp_th('Upah', '#D9D9D9') ?>
+                <?= rkk_grp_th('Aksi', '#FFFFFF', ' text-center') ?>
+              </tr>
+            <?php endif; ?>
+              <tr class="data-row" data-dept="<?= htmlspecialchars($dept_now) ?>">
+                <?php if ($show_bulk) : ?>
+                <td data-label="Pilih" align="center"><input type="checkbox" name="pilih[]" value="<?= (int)$data['id_rkk_detail'] ?>" class="row-check" style="width:16px;height:16px;cursor:pointer;"></td>
+                <?php endif; ?>
+                <td data-label="No"><?= $no++ ?></td>
+                <td data-label="Nama Sesuai KTP">
+                  <span class="text-base font-bold text-gray-900"><?= $data['nama_tampil'] ?></span><br>
+                  <span class="text-sm text-gray-500"><?= $data['no_absen_tampil'] ?></span>
+
+                  <?php if (!empty($data['menggantikan'])) : ?>
+                    <div class="text-xs text-blue-600 font-bold italic mt-1">
+                      <i class="fas fa-exchange-alt mr-1"></i> Menggantikan <?= $data['menggantikan'] ?>
+                    </div>
+                  <?php endif; ?>
+
+                  <?php if (!empty($data['digantikan_oleh'])) : ?>
+                    <div class="text-xs text-red-600 font-bold italic mt-1">
+                      <i class="fas fa-user-times mr-1"></i> Digantikan oleh <?= $data['digantikan_oleh'] ?>
+                    </div>
+                  <?php endif; ?>
+
+                  <?php if ($data['status_rkk'] != 'Hadir') : ?>
+                  <div class="mt-2">
+                    <?php if ($data['status_rkk'] == 'Tidak Hadir') : ?>
+                      <span class="bg-rose-100 text-rose-800 text-xs font-bold px-2 py-1 rounded-full">Tidak Hadir</span>
+                    <?php elseif ($data['status_rkk'] == 'Digantikan') : ?>
+                      <span class="bg-amber-100 text-amber-800 text-xs font-bold px-2 py-1 rounded-full">Digantikan</span>
+                    <?php elseif ($data['status_rkk'] == 'Pengganti') : ?>
+                      <span class="bg-blue-100 text-blue-800 text-xs font-bold px-2 py-1 rounded-full">Pengganti</span>
+                    <?php endif; ?>
+                  </div>
+                  <?php endif; ?>
+                </td>
+                <td data-label="Paraf Pekerja" align="center"></td>
+                <td data-label="OS/DHK" align="center"><?= $data['label_os'] ?? '' ?></td>
+                <td data-label="Golongan" align="center"><?= $data['label_gol'] ?? '' ?></td>
+                <td data-label="Posisi">
+                  <span class="text-base font-medium"><?= $data['nama_sub_department'] ?></span><br>
+                  <span class="text-sm text-gray-600"><?= $data['nama_departmen'] ?></span>
+                </td>
+                <td data-label="Jam Kerja" align="center"><span class="text-sm font-medium"><?= $data['jam_masuk'] ?></span></td>
+                <td data-label="Jam Masuk" align="center"></td>
+                <td data-label="Istirahat Masuk" align="center"></td>
+                <td data-label="Jam Pulang" align="center"></td>
+                <td data-label="Upah" align="right"><span class="text-sm font-bold text-gray-900">Rp <?= number_format((float)($data['upahkaryawan'] ?? 0), 0, ',', '.') ?></span></td>
+                <td data-label="Aksi">
+                  <div class="flex flex-row flex-nowrap gap-1 justify-center items-center">
+                    <?php if ($data['status_rkk'] != 'Digantikan' && $datastatusrkk < 2) : ?>
+                      <a href="?page=rkk&aksi=karyawanupdate&id=<?= $data['id_rkk_detail']; ?>"
+                        class="px-2 py-1 text-xs font-bold text-amber-700 bg-amber-50 hover:bg-amber-600 hover:text-white rounded border border-amber-300 transition-colors text-center whitespace-nowrap">
+                        <i class="fas fa-sync-alt mr-1"></i>Ganti
+                      </a>
+                    <?php endif; ?>
+                    <?php if (strtolower($_SESSION['role']) != 'admin hr') : ?>
+                      <a href="?page=rkk&aksi=detail&id=<?= $data['id_rkk_detail']; ?>"
+                        class="px-2 py-1 text-xs font-bold text-blue-700 bg-blue-50 hover:bg-blue-600 hover:text-white rounded border border-blue-300 transition-colors text-center whitespace-nowrap">
+                        <i class="fas fa-eye mr-1"></i>Detail
+                      </a>
+                    <?php endif; ?>
+                    <?php if ($datastatusrkk < 2) : ?>
+                      <button type="button"
+                        class="px-2 py-1 text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-600 hover:text-white rounded border border-rose-300 transition-colors text-center whitespace-nowrap btn-delete-detail"
+                        data-id="<?= $idrkk; ?>"
+                        data-detail-id="<?= $data['id_rkk_detail']; ?>"
+                        data-name="<?= $data['nama_tampil']; ?>">
+                        <i class="fas fa-trash-alt mr-1"></i> Hapus
+                      </button>
+                    <?php endif; ?>
+                  </div>
+                </td>
+              </tr>
+            <?php endwhile; ?>
+          </tbody>
+        </table>
+        </div>
+        </form>
+    </div>
+  </div>
+</div>
+
+<?php if (isset($_GET['msg'])): ?>
+  <script>
+    Swal.fire({
+      icon: '<?= $_GET['msg'] == "deleted" ? "success" : ($_GET['msg'] == "approved" ? "success" : ($_GET['msg'] == "unapproved" ? "info" : "error")) ?>',
+      title: '<?= $_GET['msg'] == "deleted" ? "Berhasil!" : ($_GET['msg'] == "approved" ? "Approved!" : ($_GET['msg'] == "unapproved" ? "Dibatalkan!" : "Gagal!")) ?>',
+      text: '<?= $_GET['msg'] == "deleted" ? "Data berhasil dihapus" : ($_GET['msg'] == "approved" ? "RKK berhasil di-approve" : ($_GET['msg'] == "unapproved" ? "Approve berhasil dibatalkan" : "Terjadi kesalahan")) ?>',
+      confirmButtonColor: '#2563eb'
+    });
+  </script>
+<?php endif; ?>
+
+<style>
+  /* Card Styling */
+  .panel-primary {
+    border: none;
+    border-radius: 8px;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+    overflow: hidden;
+  }
+
+  /* Table Styling Default */
+  .table thead th,
+  #tabel-rkk tbody tr.grp-header th {
+    background-color: #f8f9fa;
+    color: #333;
+    text-transform: uppercase;
+    font-size: 13px;
+    letter-spacing: 0.5px;
+    border-bottom: 2px solid #dee2e6 !important;
+    vertical-align: middle;
+    white-space: nowrap !important;
+    text-align: center !important;
+  }
+
+  /* Grid seperti Excel di layar besar (satu tabel utuh, header ikut geser; di HP tetap mode kartu) */
+  @media screen and (min-width: 769px) {
+    #tabel-rkk thead th,
+    #tabel-rkk tbody td {
+      border: 1px solid #1f2937 !important;
+    }
+    #tabel-rkk tbody td {
+      padding: 6px 8px !important;
+      white-space: nowrap !important;
+      vertical-align: middle !important;
+    }
+    #tabel-rkk thead th {
+      padding: 8px 8px !important;
+      font-size: 12px !important;
+    }
+  }
+
+  .table tbody td {
+    vertical-align: middle !important;
+    font-size: 14px;
+  }
+
+  .table-hover tbody tr:hover {
+    background-color: rgba(95, 158, 160, 0.1) !important;
+    transition: 0.3s;
+  }
+
+  /* 1. Reset wrapper agar tidak menggunakan float bawaan DataTables */
+  .dataTables_wrapper {
+    display: block !important;
+  }
+
+  /* 2. Memaksa area atas (Length & Filter) menjadi satu baris sejajar */
+  .dataTables_wrapper::before,
+  .dataTables_wrapper::after {
+    display: none !important;
+  }
+
+  /* 3. Membuat container fleksibel untuk Length (kiri) dan Filter (kanan) */
+  #dataTables-example_wrapper .row:first-child {
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    margin-bottom: 20px !important;
+    width: 100% !important;
+  }
+
+  /* 4. Styling Tampil _MENU_ (Kiri) */
+  .dataTables_length {
+    display: flex !important;
+    align-items: center !important;
+  }
+
+  .dataTables_length label {
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    margin: 0 !important;
+  }
+
+  .dataTables_length select {
+    padding: 5px 10px !important;
+    border: 1px solid #e0e6ed !important;
+    border-radius: 8px !important;
+  }
+
+  /* 5. Styling Cari: (Kanan) */
+  .dataTables_filter {
+    text-align: right !important;
+    display: flex !important;
+    justify-content: flex-end !important;
+  }
+
+  .dataTables_filter label {
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    margin: 0 !important;
+  }
+
+  .dataTables_filter input {
+    padding: 6px 12px !important;
+    border: 1px solid #e0e6ed !important;
+    border-radius: 8px !important;
+    width: 200px !important;
+  }
+
+  /* --- STYLING PAGINATE (PREV/NEXT) --- */
+  .dataTables_wrapper .dataTables_paginate {
+    display: flex !important;
+    justify-content: flex-end !important;
+    align-items: center !important;
+    gap: 4px !important;
+    padding-top: 15px !important;
+  }
+
+  .dataTables_paginate .paginate_button {
+    border: 1px solid #e2e8f0 !important;
+    background: white !important;
+    border-radius: 6px !important;
+    padding: 5px 12px !important;
+    color: #475569 !important;
+    font-weight: 500 !important;
+    cursor: pointer !important;
+    transition: all 0.2s !important;
+  }
+
+  .dataTables_paginate .paginate_button:hover {
+    background: #f8fafc !important;
+    color: #2563eb !important;
+    border-color: #cbd5e1 !important;
+  }
+
+  .dataTables_paginate .paginate_button.current {
+    background: #2563eb !important;
+    border-color: #2563eb !important;
+    color: white !important;
+  }
+
+  .dataTables_paginate .paginate_button.disabled {
+    background: #f1f5f9 !important;
+    color: #94a3b8 !important;
+    cursor: not-allowed !important;
+  }
+
+  /* --- STYLING INFO --- */
+  .dataTables_wrapper .dataTables_info {
+    padding-top: 20px !important;
+    color: #64748b !important;
+    font-size: 13px !important;
+  }
+
+  /* Responsive Mobile View Khusus Tabel */
+  @media screen and (max-width: 768px) {
+    #dataTables-example_wrapper .row:first-child {
+      flex-direction: column !important;
+      align-items: flex-start !important;
+    }
+
+    .dataTables_length,
+    .dataTables_filter {
+      width: 100% !important;
+      justify-content: flex-start !important;
+    }
+
+    .dataTables_filter input {
+      width: 100% !important;
+      max-width: 100%;
+    }
+
+    .table-modern thead {
+      display: none !important;
+    }
+
+    .table-modern tbody tr {
+      display: block;
+      margin-bottom: 1.5rem;
+      border: 1px solid #cbd5e1;
+      border-radius: 12px;
+      padding: 15px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+    }
+
+    .table-modern tbody td {
+      display: flex;
+      flex-direction: column;
+      padding: 10px 0 !important;
+      border: none !important;
+      border-bottom: 1px solid #f1f5f9 !important;
+      font-size: 15px;
+    }
+
+    .table-modern tbody td:last-child {
+      border-bottom: none !important;
+    }
+
+    .table-modern tbody td:before {
+      content: attr(data-label);
+      font-weight: 700;
+      color: #64748b;
+      text-transform: uppercase;
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+
+    .aksi-buttons {
+      display: flex;
+      flex-direction: row;
+      flex-wrap: wrap;
+      gap: 10px;
+      width: 100%;
+      margin-top: 10px;
+    }
+  }
+</style>
+
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+<script>
+  $(document).ready(function() {
+
+    // Cari karyawan + grup ikut tersaring
+    function applyTabelFilter() {
+      const q = $('#cariKaryawan').val().toLowerCase();
+      const vis = {};
+      $('#tabel-rkk tbody tr.data-row').each(function() {
+        const $tr = $(this);
+        const show = ($tr.text().toLowerCase().indexOf(q) !== -1);
+        $tr.toggle(show);
+        if (show) vis[$tr.data('dept')] = true;
+      });
+      $('#tabel-rkk tbody tr.dept-separator, #tabel-rkk tbody tr.grp-header').each(function() {
+        $(this).toggle(!!vis[$(this).data('dept')]);
+      });
+    }
+    $(document).on('input', '#cariKaryawan', applyTabelFilter);
+
+    // Pilih banyak + hapus
+    function updateCount() {
+      const n = $('#tabel-rkk tbody tr.data-row .row-check:checked').length;
+      $('#pilihCount').text(n + ' dipilih');
+    }
+    $(document).on('change', '#checkAll', function() {
+      $('#tabel-rkk tbody tr.data-row:visible .row-check').prop('checked', this.checked);
+      updateCount();
+    });
+    $(document).on('change', '.row-check', updateCount);
+    $(document).on('click', '#btnHapusPilih', function() {
+      const n = $('#tabel-rkk tbody tr.data-row .row-check:checked').length;
+      if (!n) {
+        Swal.fire({ icon: 'info', title: 'Belum ada yang dipilih', text: 'Centang dulu baris yang mau dihapus.', confirmButtonColor: '#2563eb' });
+        return;
+      }
+      Swal.fire({
+        title: 'Hapus ' + n + ' data?',
+        text: 'Data yang dipilih akan dihapus permanen!',
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: '#e11d48',
+        cancelButtonColor: '#64748b',
+        confirmButtonText: 'Ya, Hapus!',
+        cancelButtonText: 'Batal',
+        reverseButtons: true
+      }).then((result) => { if (result.isConfirmed) $('#formBulk').submit(); });
+    });
+    $(document).on('click', '.btn-hapus-grup', function() {
+      const g = $(this).data('g');
+      const rows = $('#tabel-rkk tbody tr.data-row').filter(function() { return $(this).data('dept') === g && $(this).is(':visible'); });
+      if (!rows.length) {
+        Swal.fire({ icon: 'info', title: 'Kosong', text: 'Tidak ada baris tampil di grup ini.', confirmButtonColor: '#2563eb' });
+        return;
+      }
+      Swal.fire({
+        title: 'Hapus grup ' + g + '?',
+        text: rows.length + ' nama di grup ini akan dihapus permanen!',
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: '#e11d48',
+        cancelButtonColor: '#64748b',
+        confirmButtonText: 'Ya, Hapus Semua!',
+        cancelButtonText: 'Batal',
+        reverseButtons: true
+      }).then((result) => {
+        if (result.isConfirmed) {
+          rows.find('.row-check').prop('checked', true);
+          updateCount();
+          $('#formBulk').submit();
+        }
+      });
+    });
+
+    // SweetAlert Header Action
+    $(document).on('click', '.btn-header-action', function() {
+      const id = $(this).data('id');
+      const action = $(this).data('action');
+      const text = $(this).data('text');
+
+      Swal.fire({
+        title: 'Konfirmasi',
+        text: text,
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonColor: action === 'app' ? '#059669' : '#e11d48',
+        cancelButtonColor: '#64748b',
+        confirmButtonText: 'Ya, Lanjutkan',
+        cancelButtonText: 'Batal',
+        reverseButtons: true
+      }).then((result) => {
+        if (result.isConfirmed) {
+          window.location.href = '?page=rkk&aksi=accept&id=' + id + '&iddetail=' + action;
+        }
+      });
+    });
+
+
+    // SweetAlert Delete Detail Action
+    $(document).on('click', '.btn-delete-detail', function() {
+      const id = $(this).data('id');
+      const detailId = $(this).data('detail-id');
+      const name = $(this).data('name');
+
+      Swal.fire({
+        title: 'Yakin hapus?',
+        html: `<b>${name}</b> akan dihapus permanen!`,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: '#e11d48',
+        cancelButtonColor: '#64748b',
+        confirmButtonText: 'Ya, Hapus!',
+        cancelButtonText: 'Batal',
+        reverseButtons: true
+      }).then((result) => {
+        if (result.isConfirmed) {
+          window.location.href = '?page=rkk&aksi=hapusdetail&id=' + id + '&iddetail=' + detailId;
+        }
+      });
+    });
+  });
+</script>

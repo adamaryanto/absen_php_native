@@ -1,0 +1,425 @@
+<?php
+// Import Excel absensi -> RKK yang sedang dikelola (tambah detail, BUKAN bikin RKK baru).
+// Section di Excel = nama grup borongan. Grup/karyawan yang belum ada dibuat otomatis.
+// Format: hasil export excelrkk.php (9 kolom) atau sheet PERENCANAAN file referensi (15 kolom).
+
+// Library bersama (baca xlsx/html, cocok grup/karyawan/shift, auto-generate)
+require_once __DIR__ . '/import_lib.php';
+
+// Pastikan relasi grup tersedia
+include_once __DIR__ . '/../grup_borongan/_setup.php';
+rx_ensure_schema($koneksi); // tambah otomatis kolom/tabel master yang kurang
+
+$idrkk = isset($_REQUEST['id']) ? intval($_REQUEST['id']) : 0;
+$alert = null;
+$redirect = null;
+
+if ($idrkk <= 0) {
+    $alert = ["icon" => "error", "title" => "ID Tidak Valid", "text" => "ID RKK tidak ditemukan!"];
+    $redirect = "?page=rkk";
+} else {
+    $cek_rkk = $koneksi->query("SELECT tgl_rkk, status_rkk FROM tb_rkk WHERE id_rkk = '$idrkk'");
+    $data_rkk = $cek_rkk ? $cek_rkk->fetch_assoc() : null;
+    if (!$data_rkk) {
+        $alert = ["icon" => "error", "title" => "Tidak Ditemukan", "text" => "Data RKK tidak ada!"];
+        $redirect = "?page=rkk";
+    } elseif ((int)$data_rkk['status_rkk'] >= 2) {
+        $alert = ["icon" => "error", "title" => "Akses Ditolak", "text" => "Tidak bisa import karena RKK sudah Approved/Realized!"];
+        $redirect = "?page=rkk&aksi=kelola&id=$idrkk";
+    }
+}
+$tgl_rkk = $data_rkk['tgl_rkk'] ?? date('Y-m-d');
+
+// (helper baca/cocok/auto-generate ada di import_lib.php)
+
+// ===== COMMIT =====
+if (!$alert && ($_POST['rk_step'] ?? '') === 'commit') {
+    $imp = $_SESSION['rk_imp_kelola'] ?? null;
+    if (!$imp || (int)($imp['id_rkk'] ?? 0) !== $idrkk) {
+        $alert = ["icon" => "error", "title" => "Kedaluwarsa", "text" => "Data preview kedaluwarsa. Upload ulang filenya."];
+    } else {
+        $sel = [];
+        // Payload JSON dari JS (1 variabel, kebal max_input_vars): uraikan ke $_POST agar logika bawah tetap sama.
+        // Tanpa JS (fallback) alur lama via rk_sel[] + sh_/up_/dp_/ps_ tetap jalan.
+        if (!empty($_POST['rk_payload'])) {
+            $dec = json_decode((string)$_POST['rk_payload'], true);
+            if (is_array($dec)) {
+                $_POST['rk_sel'] = [];
+                foreach ($dec as $pr) {
+                    if (!is_array($pr)) continue;
+                    $pi = (int)($pr['i'] ?? -1);
+                    if ($pi < 0) continue;
+                    $_POST['rk_sel'][] = $pi;
+                    foreach (['sh', 'up', 'dp', 'ps'] as $kk) {
+                        if (array_key_exists($kk, $pr)) $_POST[$kk . '_' . $pi] = $pr[$kk];
+                    }
+                }
+            }
+        }
+        $sel = array_map('intval', (array)($_POST['rk_sel'] ?? []));
+        $rows = [];
+        foreach (($imp['rows'] ?? []) as $i => $r) {
+            if (!in_array($i, $sel, true)) continue;
+            $r['shift_id'] = (isset($_POST["sh_$i"]) && ctype_digit((string)$_POST["sh_$i"])) ? (int)$_POST["sh_$i"] : (int)($r['shift_id'] ?? 0);
+            $r['sh_raw'] = isset($_POST["sh_$i"]) ? trim((string)$_POST["sh_$i"]) : '';
+            $r['upah'] = isset($_POST["up_$i"]) ? max(0, (int)str_replace('.', '', $_POST["up_$i"])) : (int)($r['upah'] ?? 0);
+            $r['dept_id'] = isset($_POST["dp_$i"]) ? (int)$_POST["dp_$i"] : (int)($r['dept_id'] ?? 0);
+            $r['dp_raw'] = isset($_POST["dp_$i"]) ? trim((string)$_POST["dp_$i"]) : '';
+            $r['sub_id'] = isset($_POST["ps_$i"]) ? (int)$_POST["ps_$i"] : (int)($r['sub_id'] ?? 0);
+            $r['ps_raw'] = isset($_POST["ps_$i"]) ? trim((string)$_POST["ps_$i"]) : '';
+            $rows[] = $r;
+        }
+        if (empty($rows)) {
+            $alert = ["icon" => "warning", "title" => "Kosong", "text" => "Tidak ada baris yang dipilih."];
+        } else {
+            $now = date('Y-m-d H:i:s');
+            $qd = $koneksi->query("SELECT MIN(id_departmen) AS m FROM ms_departmen");
+            $def_dept = ($qd && ($rd = $qd->fetch_assoc()) && $rd['m']) ? (int)$rd['m'] : 0;
+            $qs = $koneksi->query("SELECT MIN(id_sub_department) AS m FROM ms_sub_department");
+            $def_sub = ($qs && ($rs = $qs->fetch_assoc()) && $rs['m']) ? (int)$rs['m'] : 0;
+            $c_add = 0; $c_new_kar = 0; $c_new_grup = 0; $c_skip = 0; $c_new_shift = 0; $c_agt = 0;
+            foreach ($rows as $r) {
+                // 1. Grup: cari / buat otomatis
+                $id_grup = rk_ensure_grup($koneksi, $r['section'] ?? '', $c_new_grup);
+                // 1b. Shift: cocok / buat otomatis (12 jam)
+                $jd = rx_commit_shift($koneksi, $r, $c_new_shift);
+                // 2. Karyawan: cocok / buat otomatis (dept & posisi ikut pilihan preview)
+                $m = rx_match_karyawan($koneksi, $r['nama']);
+                if ($m) {
+                    $kid = (int)$m['id_karyawan'];
+                    $mk = $koneksi->query("SELECT id_departmen, id_sub_department, upah FROM ms_karyawan WHERE id_karyawan='$kid'")->fetch_assoc();
+                    $dep = (int)($r['dept_id'] ?? 0) > 0 ? (int)$r['dept_id'] : (((int)($mk['id_departmen'] ?? 0) > 0) ? (int)$mk['id_departmen'] : $def_dept);
+                    $dep = rx_commit_dept($koneksi, $r, $dep); // opsi teks "(baru)" -> generate otomatis
+                    $sub = rx_commit_sub($koneksi, $r, $dep);
+                    $dep = rx_valid_dept($koneksi, $dep);
+                    $sub = rx_valid_sub($koneksi, $sub, $dep);
+                    $vdep = ($dep > 0) ? "'$dep'" : "NULL";
+                    $vsub = ($sub > 0) ? "'$sub'" : "NULL";
+                    if ((int)($r['upah'] ?? 0) <= 0) $r['upah'] = (int)($mk['upah'] ?? 0);
+                } else {
+                    $dep = (int)($r['dept_id'] ?? 0) > 0 ? (int)$r['dept_id'] : $def_dept;
+                    $dep = rx_commit_dept($koneksi, $r, $dep); // opsi teks "(baru)" -> generate otomatis
+                    $sub = rx_commit_sub($koneksi, $r, $dep);
+                    $dep = rx_valid_dept($koneksi, $dep);
+                    $sub = rx_valid_sub($koneksi, $sub, $dep);
+                    $vdep = ($dep > 0) ? "'$dep'" : "NULL";
+                    $vsub = ($sub > 0) ? "'$sub'" : "NULL";
+                    $kid = rx_make_karyawan($koneksi, $r['nama'], $r['osdhk'] ?? '', $r['golongan'] ?? '', $r['posisi'] ?? '', $jd, $r['upah'] ?? 0, $tgl_rkk, $dep, $sub);
+                    if ($kid <= 0) { $c_skip++; continue; }
+                    // Paksa dept/posisi master ikut pilihan preview
+                    $koneksi->query("UPDATE ms_karyawan SET id_departmen='$dep', id_sub_department='$sub' WHERE id_karyawan='$kid'");
+                    $c_new_kar++;
+                }
+                // 2b. Lengkapi OS/Golongan master yang masih kosong dari Excel
+                // (jalan juga saat barisnya dilewati duplikat di bawah)
+                if ($kid > 0) rx_fill_master_osgol($koneksi, $kid, $r['osdhk'] ?? '', $r['golongan'] ?? '');
+                // 2c. Auto-masuk master grup: section Excel = grupnya (boleh rangkap, tidak mengeluarkan dari grup lama)
+                if ($kid > 0 && $id_grup !== null) {
+                    $gid_ins = (int)$id_grup;
+                    if ($koneksi->query("INSERT IGNORE INTO ms_grup_borongan_anggota (id_grup, id_karyawan, tarif, is_borongan) VALUES ('$gid_ins', '$kid', NULL, 0)")) {
+                        if ((int)$koneksi->affected_rows > 0) $c_agt++;
+                    }
+                }
+                // 3. Lewati duplikat di RKK ini
+                $cek = $koneksi->query("SELECT id_rkk_detail FROM tb_rkk_detail WHERE id_rkk='$idrkk' AND id_karyawan='$kid' LIMIT 1");
+                if ($cek && $cek->num_rows > 0) { $c_skip++; continue; }
+                $up = (int)($r['upah'] ?? 0);
+                $vg = ($id_grup === null) ? "NULL" : "'$id_grup'";
+                $ok = $koneksi->query("INSERT INTO tb_rkk_detail (id_rkk, id_karyawan, nama_karyawan_manual, upah, id_departmen, id_sub_department, id_jadwal, id_grup, status_rkk, potongan_telat, potongan_istirahat, potongan_lainnya, tgl_updt) VALUES ('$idrkk', '$kid', NULL, '$up', $vdep, $vsub, '$jd', $vg, 'Hadir', '0', '0', '0', '$now')");
+                if ($ok) $c_add++; else $c_skip++;
+            }
+            unset($_SESSION['rk_imp_kelola']);
+            $msg = "$c_add ditambahkan" . ($c_new_kar > 0 ? ", $c_new_kar karyawan baru dibuat" : "") . ($c_new_grup > 0 ? ", $c_new_grup grup baru dibuat" : "") . ($c_new_shift > 0 ? ", $c_new_shift shift baru dibuat" : "") . ($c_agt > 0 ? ", $c_agt anggota masuk master grup" : "") . ($c_skip > 0 ? ", $c_skip dilewati (sudah ada/gagal)" : "");
+            $alert = ["icon" => $c_add > 0 ? "success" : "warning", "title" => $c_add > 0 ? "Import Selesai" : "Tidak Ada yang Disimpan", "text" => $msg];
+            $redirect = "?page=rkk&aksi=kelola&id=$idrkk";
+        }
+    }
+}
+
+// ===== PREVIEW =====
+$preview = null;
+if (!$alert && ($_POST['rk_step'] ?? '') === 'preview' && !empty($_FILES['fexcel']['tmp_name'])) {
+    $sheets = rk_read_any($_FILES['fexcel']['tmp_name']);
+    if ($sheets === false || empty($sheets)) {
+        $needzip = (strtolower(pathinfo($_FILES['fexcel']['name'] ?? '', PATHINFO_EXTENSION)) === 'xlsx' && !class_exists('ZipArchive'));
+        $alert = $needzip
+            ? ["icon" => "error", "title" => "PHP ZIP Mati", "text" => "File .xlsx butuh extension php_zip. Buka php.ini, hapus titik-koma di depan extension=zip, lalu restart Apache/XAMPP."]
+            : ["icon" => "error", "title" => "Gagal Baca", "text" => "File tidak bisa dibaca (harus .xlsx atau .xls hasil export aplikasi). Tutup dulu file Excel-nya bila sedang dibuka. Info file: " . rx_diag_file($_FILES['fexcel']['tmp_name'], $_FILES['fexcel']['name'] ?? '')];
+    } else {
+        // Prioritas: sheet PERENCANAAN, lalu sheet pertama berisi baris
+        $picked = null; $pickedName = '';
+        foreach ($sheets as $sn => $rw) {
+            if (stripos($sn, 'RENCANA') !== false || stripos($sn, 'PERENCANA') !== false) { $picked = $rw; $pickedName = $sn; break; }
+        }
+        if ($picked === null) {
+            foreach ($sheets as $sn => $rw) {
+                $t = rk_extract_kelola($rw, $koneksi);
+                if (!empty($t['rows'])) { $picked = $rw; $pickedName = $sn; break; }
+            }
+        }
+        if ($picked === null) {
+            $alert = ["icon" => "warning", "title" => "Kosong", "text" => "Tidak ada baris karyawan di file ini."];
+        } else {
+            $ex = rk_extract_kelola($picked, $koneksi);
+            // id karyawan yang SUDAH ada di RKK ini
+            $have = [];
+            $qh = $koneksi->query("SELECT id_karyawan FROM tb_rkk_detail WHERE id_rkk='$idrkk' AND id_karyawan<>0");
+            while ($qh && ($hh = $qh->fetch_assoc())) $have[(int)$hh['id_karyawan']] = true;
+            $rows = [];
+            $qdd = $koneksi->query("SELECT MIN(id_departmen) AS m FROM ms_departmen");
+            $pv_dept = ($qdd && ($rdd = $qdd->fetch_assoc()) && $rdd['m']) ? (int)$rdd['m'] : 0;
+            $qss = $koneksi->query("SELECT MIN(id_sub_department) AS m FROM ms_sub_department");
+            $pv_sub = ($qss && ($rss = $qss->fetch_assoc()) && $rss['m']) ? (int)$rss['m'] : 0;
+            foreach ($ex['rows'] as $r) {
+                $m = rx_match_karyawan($koneksi, $r['nama']);
+                $sh = rk_find_shift($koneksi, $r['g_raw']);
+                $shift_baru = '';
+                if (!$sh) {
+                    $st = rx_frac_to_time($r['g_raw']);
+                    if ($st !== '' && $st !== '00:00:00') $shift_baru = substr($st, 0, 5);
+                    $sh = rk_match_shift($koneksi, $r['g_raw']); // fallback tampilan
+                }
+                // Department ikut master; Posisi ikut teks Excel (cocok -> kepilih, baru -> opsi "(baru)" + auto-create).
+                // Bila department belum ketemu tapi posisinya baru -> department ikut teks posisi (opsi "(baru)" + auto-create).
+                $dep_id = $pv_dept; $sub_id = $pv_sub; $posisi_baru = ''; $dept_baru = '';
+                $pos_txt0 = trim($r['posisi'] ?? '');
+                $sid0 = ($pos_txt0 !== '') ? rx_lookup_id($koneksi, 'ms_sub_department', 'nama_sub_department', $pos_txt0) : 0;
+                if ($m) {
+                    $qm = $koneksi->query("SELECT id_departmen, id_sub_department FROM ms_karyawan WHERE id_karyawan='" . (int)$m['id_karyawan'] . "' LIMIT 1");
+                    if ($qm && ($rm = $qm->fetch_assoc())) {
+                        if ((int)($rm['id_departmen'] ?? 0) > 0) $dep_id = (int)$rm['id_departmen'];
+                        if ($sid0 > 0) { $sub_id = $sid0; }
+                        elseif ($pos_txt0 !== '') { $posisi_baru = $pos_txt0; }
+                        else { $sub_id = 0; } // Excel kosong -> kosong, jangan ngarang
+                    } elseif ($sid0 > 0) { $sub_id = $sid0; }
+                    elseif ($pos_txt0 !== '') { $posisi_baru = $pos_txt0; }
+                } else {
+                    if ($sid0 > 0) {
+                        $sub_id = $sid0;
+                        $d0 = rx_sub_dept($koneksi, $sid0);
+                        if ($d0 > 0) $dep_id = $d0;
+                        } elseif ($pos_txt0 !== '') {
+                            $posisi_baru = $pos_txt0; // belum ada di master -> dibuat otomatis saat simpan
+                        } else { $sub_id = 0; } // Excel kosong -> kosong, jangan ngarang
+                }
+                if ($dep_id <= 0 && $posisi_baru !== '') $dept_baru = $posisi_baru; // dept ngikutin posisi baru di Excel
+                $os_txt0 = trim($r['osdhk'] ?? ''); $gol_txt0 = trim($r['golongan'] ?? '');
+                $os_baru = (!$m && $os_txt0 !== '' && rx_lookup_id($koneksi, 'ms_os_dhk', 'OS_DHK', $os_txt0) <= 0) ? $os_txt0 : '';
+                $gol_baru = (!$m && $gol_txt0 !== '' && rx_lookup_id($koneksi, 'ms_golongan', 'golongan', $gol_txt0) <= 0) ? $gol_txt0 : '';
+                $rows[] = [
+                    'nama' => $r['nama'], 'section' => $r['section'],
+                    'osdhk' => $r['osdhk'], 'golongan' => $r['golongan'], 'posisi' => $r['posisi'],
+                    'osdhk_baru' => $os_baru, 'golongan_baru' => $gol_baru,
+                    'dirty' => !empty($r['dirty']),
+                    'kar_id' => $m ? (int)$m['id_karyawan'] : 0,
+                    'kar_nama' => $m ? $m['nama_karyawan'] : '',
+                    'kar_upah' => $m ? (int)($m['upah'] ?? 0) : 0,
+                    'dup' => $m && isset($have[(int)$m['id_karyawan']]),
+                    'grup_baru' => trim($r['section']) !== '' && !rk_find_grup($koneksi, $r['section']),
+                    'shift_id' => $sh ? (int)$sh['id_jadwal'] : 0,
+                    'shift_txt' => $sh ? ($sh['keterangan'] . ' (' . substr($sh['jam_masuk'], 0, 5) . ')') : '-',
+                    'shift_baru' => $shift_baru,
+                    'upah' => (int)$r['upah_excel'] > 0 ? (int)$r['upah_excel'] : ($m ? (int)($m['upah'] ?? 0) : 0),
+                    'dept_id' => $dep_id,
+                    'sub_id' => $sub_id,
+                    'posisi_baru' => $posisi_baru,
+                    'dept_baru' => $dept_baru,
+                ];
+            }
+            $_SESSION['rk_imp_kelola'] = ['id_rkk' => $idrkk, 'rows' => $rows];
+            $preview = ['fname' => $_FILES['fexcel']['name'], 'sheet' => $pickedName, 'rows' => $rows, 'skipped' => $ex['skipped']];
+        }
+    }
+}
+$list_jadwal_prev = $koneksi->query("SELECT * FROM tb_jadwal ORDER BY id_jadwal ASC");
+$jadwal_opts = [];
+while ($list_jadwal_prev && ($jj = $list_jadwal_prev->fetch_assoc())) $jadwal_opts[] = $jj;
+$dept_opts = [];
+$qd_prev = $koneksi->query("SELECT * FROM ms_departmen ORDER BY nama_departmen ASC");
+while ($qd_prev && ($dd = $qd_prev->fetch_assoc())) $dept_opts[] = $dd;
+$sub_opts = [];
+$qs_prev = $koneksi->query("SELECT * FROM ms_sub_department ORDER BY nama_sub_department ASC");
+while ($qs_prev && ($ss = $qs_prev->fetch_assoc())) $sub_opts[] = $ss;
+?>
+<div class="max-w-5xl mx-auto px-2 sm:px-6 lg:px-8 mt-4 sm:mt-10 mb-10">
+    <div class="bg-white shadow-xl border border-gray-200 rounded-2xl overflow-hidden">
+        <div class="bg-gradient-to-r from-emerald-600 to-emerald-700 px-5 sm:px-8 py-5 sm:py-6">
+            <h3 class="text-xl sm:text-2xl font-extrabold text-white m-0 tracking-tight flex items-center">
+                <i class="fas fa-file-excel mr-3"></i> Import Excel ke RKK
+            </h3>
+            <p class="text-emerald-100 text-xs sm:text-sm mt-1">Section di Excel = grup. Grup &amp; karyawan yang belum ada dibuat otomatis.</p>
+        </div>
+        <div class="p-5 sm:p-8">
+            <div class="mb-5 flex flex-col sm:flex-row gap-3">
+                <a href="?page=rkk&aksi=kelola&id=<?= $idrkk; ?>" class="inline-flex justify-center items-center px-5 py-2.5 border border-gray-300 shadow-sm text-sm font-bold rounded-xl text-gray-700 bg-white hover:bg-gray-50 transition">
+                    <i class="fas fa-arrow-left mr-2"></i> Kembali ke Kelola
+                </a>
+            </div>
+            <?php if ($preview): ?>
+            <div class="mb-4 p-4 bg-emerald-50 border border-emerald-100 rounded-lg text-sm">
+                <strong>File:</strong> <?= htmlspecialchars($preview['fname']); ?> | <strong>Sheet:</strong> <?= htmlspecialchars($preview['sheet']); ?> |
+                <strong><?= count($preview['rows']); ?></strong> baris karyawan
+            </div>
+            <form method="POST" id="rk_commit_form">
+                <input type="hidden" name="rk_step" value="commit">
+                <input type="hidden" name="rk_payload" id="rk_payload" value="">
+                <input type="hidden" name="id" value="<?= $idrkk; ?>">
+                <div class="rounded-lg border border-gray-300 mb-4" style="overflow-x:auto;">
+                    <table class="text-left border-collapse" style="min-width:1200px;width:100%;">
+                        <thead class="bg-gray-100">
+                            <tr style="white-space:nowrap;">
+                                <th class="py-2 px-3 w-10"><input type="checkbox" id="rk_all" checked style="width:16px;height:16px;"></th>
+                                <th class="py-2 px-3 text-xs font-bold text-gray-700 uppercase">Nama (Excel)</th>
+                                <th class="py-2 px-3 text-xs font-bold text-gray-700 uppercase text-right">Upah</th>
+                                <th class="py-2 px-3 text-xs font-bold text-gray-700 uppercase">Grup</th>
+                                <th class="py-2 px-3 text-xs font-bold text-gray-700 uppercase">Karyawan</th>
+                                <th class="py-2 px-3 text-xs font-bold text-gray-700 uppercase">Shift</th>
+                                <th class="py-2 px-3 text-xs font-bold text-gray-700 uppercase">Posisi</th>
+                                <th class="py-2 px-3 text-xs font-bold text-gray-700 uppercase">Department</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        <?php foreach ($preview['rows'] as $i => $r): ?>
+                            <tr class="border-t border-gray-200">
+                                <td class="py-2 px-3"><input type="checkbox" class="rk_sel" name="rk_sel[]" value="<?= $i; ?>" <?= ($r['dup'] || !empty($r['dirty'])) ? '' : 'checked'; ?> style="width:16px;height:16px;"></td>
+                                <td class="py-2 px-3 text-sm font-bold"><?= htmlspecialchars($r['nama']); ?>
+                                    <div class="text-[11px] font-normal text-gray-400"><?= htmlspecialchars(trim(($r['osdhk'] . ' / ' . $r['golongan'] . ' / ' . $r['posisi']), ' /')); ?>
+                                        <?php if (!empty($r['osdhk_baru'])): ?><span class="font-bold text-purple-700">OS baru</span><?php endif; ?>
+                                        <?php if (!empty($r['golongan_baru'])): ?><span class="font-bold text-purple-700">Gol baru</span><?php endif; ?>
+                                    </div>
+                                </td>
+                                <td class="py-2 px-3"><input type="number" name="up_<?= $i; ?>" value="<?= (int)$r['upah']; ?>" min="0" class="w-28 px-2 py-1.5 border border-gray-300 rounded-lg text-sm text-right"></td>
+                                <td class="py-2 px-3 text-sm">
+                                    <?= $r['section'] !== '' ? htmlspecialchars($r['section']) : '<span class="text-gray-400 italic">Tanpa Grup</span>'; ?>
+                                    <?php if ($r['grup_baru']): ?><div><span class="px-2 py-0.5 text-[11px] font-bold rounded-full bg-purple-100 text-purple-800">Grup baru</span></div><?php endif; ?>
+                                </td>
+                                <td class="py-2 px-3 text-sm">
+                                    <?php if ($r['dup']): ?>
+                                        <span class="px-2 py-0.5 text-[11px] font-bold rounded-full bg-gray-200 text-gray-600">Sudah ada di RKK</span>
+                                    <?php elseif ($r['kar_id'] > 0): ?>
+                                        <span class="px-2 py-0.5 text-[11px] font-bold rounded-full bg-green-100 text-green-800">Cocok</span>
+                                        <div class="text-[11px] text-gray-400"><?= htmlspecialchars($r['kar_nama']); ?></div>
+                                    <?php else: ?>
+                                        <span class="px-2 py-0.5 text-[11px] font-bold rounded-full bg-blue-100 text-blue-800">Karyawan baru</span>
+                                    <?php endif; ?>
+                                    <?php if (!empty($r['dirty'])): ?><div><span class="px-2 py-0.5 text-[11px] font-bold rounded-full bg-amber-100 text-amber-800">Baris kotor</span></div><?php endif; ?>
+                                </td>
+                                <td class="py-2 px-3">
+                                    <select name="sh_<?= $i; ?>" class="px-2 py-1.5 border border-gray-300 rounded-lg text-sm bg-white">
+                                        <?php foreach ($jadwal_opts as $jo): ?>
+                                            <option value="<?= $jo['id_jadwal']; ?>" <?= (empty($r['shift_baru']) && (int)$jo['id_jadwal'] === (int)$r['shift_id']) ? 'selected' : ''; ?>><?= htmlspecialchars($jo['keterangan']); ?></option>
+                                        <?php endforeach; ?>
+                                        <?php if (!empty($r['shift_baru'])): ?><option value="baru:<?= htmlspecialchars($r['shift_baru']); ?>" selected>Jam <?= htmlspecialchars($r['shift_baru']); ?> (baru)</option><?php endif; ?>
+                                    </select>
+                                    <?php if (!empty($r['shift_baru'])): ?><div class="text-[11px] font-bold text-purple-700 mt-1">Shift jam <?= htmlspecialchars($r['shift_baru']); ?> baru → otomatis dibuat (12 jam)</div><?php endif; ?>
+                                </td>
+                                <td class="py-2 px-3">
+                                    <select name="ps_<?= $i; ?>" class="rk_pos px-2 py-1.5 border border-gray-300 rounded-lg text-sm bg-white">
+                                        <option value="0"<?= ((int)($r['sub_id'] ?? 0) === 0 && empty($r['posisi_baru']) ? ' selected' : ''); ?>>- Kosong -</option>
+                                        <?php foreach ($sub_opts as $so): ?>
+                                            <option value="<?= $so['id_sub_department']; ?>" data-dept="<?= (int)($so['id_departmen'] ?? 0); ?>" <?= (empty($r['posisi_baru']) && (int)$so['id_sub_department'] === (int)($r['sub_id'] ?? 0)) ? 'selected' : ''; ?>><?= htmlspecialchars($so['nama_sub_department']); ?></option>
+                                        <?php endforeach; ?>
+                                        <?php if (!empty($r['posisi_baru'])): ?><option value="<?= htmlspecialchars($r['posisi_baru']); ?>" selected><?= htmlspecialchars($r['posisi_baru']); ?> (baru)</option><?php endif; ?>
+                                    </select>
+                                    <?php if (!empty($r['posisi_baru'])): ?><div class="text-[11px] font-bold text-purple-700 mt-1">“<?= htmlspecialchars($r['posisi_baru']); ?>” baru → otomatis dibuat</div><?php endif; ?>
+                                </td>
+                                <td class="py-2 px-3">
+                                    <select name="dp_<?= $i; ?>" class="rk_dept px-2 py-1.5 border border-gray-300 rounded-lg text-sm bg-white">
+                                        <?php foreach ($dept_opts as $do): ?>
+                                            <option value="<?= $do['id_departmen']; ?>" <?= (empty($r['dept_baru']) && (int)$do['id_departmen'] === (int)($r['dept_id'] ?? 0)) ? 'selected' : ''; ?>><?= htmlspecialchars($do['nama_departmen']); ?></option>
+                                        <?php endforeach; ?>
+                                        <?php if (!empty($r['dept_baru'])): ?><option value="<?= htmlspecialchars($r['dept_baru']); ?>" selected><?= htmlspecialchars($r['dept_baru']); ?> (baru)</option><?php endif; ?>
+                                    </select>
+                                    <?php if (!empty($r['dept_baru'])): ?><div class="text-[11px] font-bold text-purple-700 mt-1">“<?= htmlspecialchars($r['dept_baru']); ?>” baru → otomatis dibuat</div><?php endif; ?>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+                <?php if (!empty($preview['skipped'])): ?>
+                <div class="mb-4 p-3 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-500">
+                    <strong>Dilewati otomatis (<?= count($preview['skipped']); ?> baris):</strong>
+                    <?= htmlspecialchars(implode(', ', array_map(function($s) { return $s['nama'] . ' (baris ' . $s['row'] . (isset($s['alasan']) ? ' — ' . $s['alasan'] : '') . ')'; }, $preview['skipped']))); ?>
+                </div>
+                <?php endif; ?>
+                <div class="flex flex-col sm:flex-row gap-3">
+                    <button type="submit" class="inline-flex justify-center items-center px-6 py-2.5 text-sm font-bold rounded-xl shadow-md text-white bg-emerald-600 hover:bg-emerald-700 transition">
+                        <i class="fas fa-check mr-2"></i> Simpan ke RKK
+                    </button>
+                    <a href="?page=rkk&aksi=importkelola&id=<?= $idrkk; ?>" class="inline-flex justify-center items-center px-5 py-2.5 border border-gray-300 text-sm font-bold rounded-xl text-gray-700 bg-white hover:bg-gray-50 transition">Ulangi</a>
+                </div>
+            </form>
+            <script>
+                document.getElementById('rk_all').addEventListener('change', function() {
+                    document.querySelectorAll('.rk_sel').forEach(function(c) { c.checked = document.getElementById('rk_all').checked; });
+                });
+                // Posisi ikut department: pilihan posisi difilter per baris
+                function rkFilterRow(tr) {
+                    var d = tr.querySelector('.rk_dept');
+                    var p = tr.querySelector('.rk_pos');
+                    if (!d || !p) return;
+                    var dv = d.value;
+                    Array.prototype.forEach.call(p.options, function(o) {
+                        if (!o.value) return;
+                        var od = o.getAttribute('data-dept');
+                        o.hidden = (od && od !== '0' && dv && od !== dv);
+                    });
+                    var sel = p.selectedOptions && p.selectedOptions[0];
+                    if (sel && sel.hidden) p.selectedIndex = 0;
+                }
+                document.querySelectorAll('.rk_dept').forEach(function(d) {
+                    d.addEventListener('change', function() { rkFilterRow(d.closest('tr')); });
+                });
+                document.querySelectorAll('table tbody tr').forEach(function(tr) { rkFilterRow(tr); });
+                // Packing anti max_input_vars: kirim baris tercentang sebagai 1 JSON, input per-baris di-disable agar tidak ikut ter-post
+                document.getElementById('rk_commit_form').addEventListener('submit', function() {
+                    var rows = [];
+                    document.querySelectorAll('.rk_sel:checked').forEach(function(c) {
+                        var idx = c.value;
+                        function v(pref) { var el = document.querySelector('[name="' + pref + idx + '"]'); return el ? el.value : ''; }
+                        rows.push({ i: parseInt(idx, 10), sh: v('sh_'), up: v('up_'), dp: v('dp_'), ps: v('ps_') });
+                    });
+                    document.getElementById('rk_payload').value = JSON.stringify(rows);
+                    document.querySelectorAll('.rk_sel, select[name^="sh_"], input[name^="up_"], select[name^="dp_"], select[name^="ps_"]').forEach(function(el) { el.disabled = true; });
+                });
+            </script>
+            <?php else: ?>
+            <form method="POST" enctype="multipart/form-data" class="max-w-xl">
+                <input type="hidden" name="rk_step" value="preview">
+                <input type="hidden" name="id" value="<?= $idrkk; ?>">
+                <div class="mb-4">
+                    <label class="block text-sm font-bold text-gray-700 mb-2">File Excel (.xlsx / .xls hasil export)</label>
+                    <input type="file" name="fexcel" accept=".xlsx,.xls" required class="w-full px-4 py-2.5 rounded-xl border border-gray-300 text-sm bg-white">
+                </div>
+                <button type="submit" class="inline-flex justify-center items-center px-6 py-2.5 text-sm font-bold rounded-xl shadow-md text-white bg-emerald-600 hover:bg-emerald-700 transition">
+                    <i class="fas fa-upload mr-2"></i> Upload &amp; Preview
+                </button>
+            </form>
+            <div class="mt-6 p-4 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-600 leading-relaxed">
+                <strong>Cara kerja:</strong> tiap section (bar ungu, mis. ADMIN) dianggap 1 grup — kalau grupnya belum ada di master, otomatis dibuatkan.
+                Nama yang tidak cocok master otomatis dibuatkan karyawan baru (No. Absen = MAX+1, OS/Golongan/Posisi ikut yang tertulis di Excel kalau ada).
+                Shift ditebak dari kolom JAM KERJA, Upah diambil dari kolom UPAH (kalau ada) — keduanya bisa diubah per baris di preview. Shift yang belum ada di master otomatis dibuatkan (12 jam).
+                Department &amp; Posisi ikut master/tebakan Excel dan bisa diubah per baris — pilihan Posisi otomatis ikut Department. Posisi yang belum ada di master otomatis dibuatkan saat simpan.
+                Baris yang sudah ada di RKK ini otomatis tidak dicentang.
+            </div>
+            <?php endif; ?>
+        </div>
+    </div>
+</div>
+
+<?php if ($alert): ?>
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+<script>
+Swal.fire({
+    icon: "<?= $alert['icon'] ?>",
+    title: "<?= $alert['title'] ?>",
+    text: "<?= $alert['text'] ?>",
+    confirmButtonColor: "#059669"
+}).then(() => {
+    <?php if ($redirect): ?>
+        window.location.href = "<?= $redirect ?>";
+    <?php endif; ?>
+});
+</script>
+<?php endif; ?>
