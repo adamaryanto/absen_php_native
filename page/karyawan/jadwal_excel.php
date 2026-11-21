@@ -85,7 +85,14 @@ function kj_read_sheet1($file) {
 }
 
 if (!function_exists('kj_norm')) {
-function kj_norm($s) { $s = trim((string)$s); return preg_replace('/\s+/', ' ', $s); }
+function kj_norm($s) {
+    // 2026-11-21: rapikan spasi aneh dari Excel (NBSP / zero-width / BOM) supaya
+    // nama seperti "AKHMAD LOMRI" tetap cocok dengan master dan tidak dibuat
+    // sebagai karyawan baru (penyebab duplikat di Cetak Slip).
+    $s = str_replace(["\xC2\xA0", "\xE2\x80\x8B", "\xEF\xBB\xBF"], ' ', (string)$s);
+    $s = preg_replace('/[\x{00A0}\x{200B}\x{FEFF}]/u', ' ', $s);
+    return trim(preg_replace('/\s+/u', ' ', $s));
+}
 }
 
 if (!function_exists('kj_match_karyawan')) {
@@ -97,7 +104,9 @@ function kj_match_karyawan($koneksi, $v) {
         if ($q && $q->num_rows > 0) return $q->fetch_assoc();
     }
     $esc = $koneksi->real_escape_string($v);
-    $q = $koneksi->query("SELECT k.id_karyawan, k.no_absen, k.nama_karyawan, k.id_jadwal, j.keterangan AS shift_now FROM ms_karyawan k LEFT JOIN tb_jadwal j ON j.id_jadwal=k.id_jadwal WHERE TRIM(k.nama_karyawan)='$esc' OR LOWER(TRIM(k.nama_karyawan))=LOWER('$esc') LIMIT 1");
+    // 2026-11-21: kalau ada beberapa master dengan nama sama (duplikat), pilih
+    // yang aktif, sudah punya upah, lalu id paling kecil (baris asli).
+    $q = $koneksi->query("SELECT k.id_karyawan, k.no_absen, k.nama_karyawan, k.id_jadwal, j.keterangan AS shift_now FROM ms_karyawan k LEFT JOIN tb_jadwal j ON j.id_jadwal=k.id_jadwal WHERE TRIM(k.nama_karyawan)='$esc' OR LOWER(TRIM(k.nama_karyawan))=LOWER('$esc') ORDER BY (k.status_karyawan='Aktif') DESC, (k.upah>0) DESC, k.id_karyawan ASC LIMIT 1");
     if ($q && $q->num_rows > 0) return $q->fetch_assoc();
     return null;
 }
@@ -264,6 +273,16 @@ if ($step === 'commit') {
             if (isset($ov[$i]) && ctype_digit((string)$ov[$i]) && (int)$ov[$i] > 0) {
                 $chk = $koneksi->query("SELECT id_jadwal FROM tb_jadwal WHERE id_jadwal='" . (int)$ov[$i] . "' LIMIT 1");
                 if ($chk && $chk->num_rows > 0) $sid = (int)$ov[$i];
+            }
+            if (empty($r['karyawan_id']) && !empty($r['nama_excel']) && !empty($sid)) {
+                // 2026-11-21: cek ulang nama tepat sebelum insert. Session preview
+                // bisa kedaluwarsa atau nama dari Excel berisi spasi aneh; jangan
+                // sampai bikin master duplikat (mis. AKHMAD LOMRI 2x) yang lalu
+                // muncul dobel di Cetak Slip.
+                $emp_recheck = kj_match_karyawan($koneksi, $r['nama_excel']);
+                if ($emp_recheck) {
+                    $r['karyawan_id'] = (int)$emp_recheck['id_karyawan'];
+                }
             }
             if (empty($r['karyawan_id']) && !empty($r['nama_excel']) && !empty($sid)) {
                 // Karyawan belum ada -> buatkan baru di master (absen dari Excel bila kosong, else MAX+1)

@@ -42,12 +42,35 @@ if ($has_snapshot) {
         LEFT JOIN ms_os_dhk O2 ON O2.id_os_dhk = d.id_os_dhk
         WHERE k2.id_karyawan IS NULL" . $snap_os;
 }
+// 2026-11-21: sembunyikan master duplikat (nama sama) yang tidak punya data
+// Realisasi/Rencana sama sekali. Contoh: AKHMAD LOMRI punya 2 baris master
+// (id 310 no_absen 55 yang dipakai, dan id 657 no_absen 1080 sisa impor jadwal).
+// Akibatnya Cetak Slip menampilkan 2 baris dan yang kedua slipnya kosong.
+// Aturan: tampilkan baris yang punya data; kalau satu nama tidak punya data
+// sama sekali, tampilkan hanya id terkecil (baris master paling awal).
+$slipk_dedupe = "
+      AND (
+        EXISTS (SELECT 1 FROM tb_realisasi_detail R WHERE R.id_karyawan = A.id_karyawan)
+        OR EXISTS (SELECT 1 FROM tb_rkk_detail D WHERE D.id_karyawan = A.id_karyawan)
+        OR (
+          NOT EXISTS (
+            SELECT 1 FROM ms_karyawan K2
+            WHERE K2.status_karyawan = 'Aktif' AND K2.id_karyawan <> A.id_karyawan
+              AND UPPER(TRIM(K2.nama_karyawan)) = UPPER(TRIM(A.nama_karyawan))
+              AND (EXISTS (SELECT 1 FROM tb_realisasi_detail R2 WHERE R2.id_karyawan = K2.id_karyawan)
+                OR EXISTS (SELECT 1 FROM tb_rkk_detail D2 WHERE D2.id_karyawan = K2.id_karyawan))
+          )
+          AND A.id_karyawan = (SELECT MIN(K3.id_karyawan) FROM ms_karyawan K3
+                               WHERE K3.status_karyawan = 'Aktif'
+                                 AND UPPER(TRIM(K3.nama_karyawan)) = UPPER(TRIM(A.nama_karyawan)))
+        )
+      )";
 $q_list = $koneksi->query("SELECT * FROM (
                            SELECT A.id_karyawan, A.no_absen, A.nama_karyawan, B.nama_departmen, O.OS_DHK AS label_os
                            FROM ms_karyawan A
                            LEFT JOIN ms_departmen B ON A.id_departmen = B.id_departmen
                            LEFT JOIN ms_os_dhk O ON A.id_os_dhk = O.id_os_dhk
-                           WHERE A.status_karyawan = 'Aktif' $slipk_os$slipk_filter
+                           WHERE A.status_karyawan = 'Aktif' $slipk_os$slipk_filter$slipk_dedupe
                            $slipk_hist_union
                            ) X
                            ORDER BY X.nama_karyawan ASC");

@@ -116,6 +116,23 @@ function rupiah($a){ return "Rp " . number_format($a, 0, ',', '.'); }
                 while ($qBorSlip && ($br = $qBorSlip->fetch_assoc())) $bor_map_slip[(int)$br['id_realisasi_detail']] = (int)$br['total'];
             }
             usort($rows_real, function($a, $b){ return strcmp($a['tgl_realisasi_detail'], $b['tgl_realisasi_detail']); });
+
+            // 2026-11-21: kalau baris ini tidak punya data sama sekali, cek apakah
+            // ini master duplikat (nama sama) yang data aslinya ada di id lain.
+            // Contoh: AKHMAD LOMRI id 657 (sisa impor jadwal) -> id 310 yang dipakai.
+            $slip_dup_primary = null;
+            if (empty($rows_real)) {
+                $nm_dup_esc = $koneksi->real_escape_string(trim((string)$namaKaryawan));
+                if ($nm_dup_esc !== '') {
+                    $q_dup = $koneksi->query("SELECT K.id_karyawan, K.no_absen, K.nama_karyawan
+                        FROM ms_karyawan K
+                        WHERE K.status_karyawan = 'Aktif' AND K.id_karyawan <> '" . (int)$id . "'
+                          AND UPPER(TRIM(K.nama_karyawan)) = UPPER('$nm_dup_esc')
+                          AND EXISTS (SELECT 1 FROM tb_realisasi_detail R WHERE R.id_karyawan = K.id_karyawan)
+                        ORDER BY K.id_karyawan ASC LIMIT 1");
+                    if ($q_dup && $q_dup->num_rows > 0) $slip_dup_primary = $q_dup->fetch_assoc();
+                }
+            }
             ?>
 <?php
 // ===== Insentif bulanan dinamis (per orang, sama seperti slip Realisasi) =====
@@ -152,6 +169,15 @@ if ($ins_bulanan > 0 && !empty($ttgl1)) {
                 </a>
                 <?php endif; ?>
             </div>
+            <?php if (!empty($slip_dup_primary)): ?>
+            <div class="mb-4 p-4 rounded-xl border border-amber-200 bg-amber-50 text-sm text-amber-800">
+                <i class="fas fa-exclamation-triangle mr-1"></i>
+                ID <?= (int)$id ?> tidak punya data Realisasi di periode ini. Kemungkinan ini baris master duplikat dari
+                <strong><?= htmlspecialchars((string)$slip_dup_primary['nama_karyawan']) ?></strong>
+                (absen <?= htmlspecialchars((string)$slip_dup_primary['no_absen']) ?>).
+                <a class="underline font-bold" href="?page=realisasi&aksi=slip_simple&id=<?= (int)$slip_dup_primary['id_karyawan'] ?>&ttgl1=<?= $ttgl1 ?>&ttgl2=<?= $ttgl2 ?>">Buka slip yang benar</a>
+            </div>
+            <?php endif; ?>
             <div class="table-responsive">
                 <table class="w-full text-left border-collapse table-modern" id="slipSimpleTable">
                     <thead class="bg-gray-50 border-b">
@@ -170,7 +196,6 @@ if ($ins_bulanan > 0 && !empty($ttgl1)) {
                     </thead>
                     <tbody class="divide-y">
                         <?php if(empty($rows_real)): ?>
-                        <tr><td class="py-3 px-3 text-sm">-</td><td class="py-3 px-3 text-sm">-</td><td class="py-3 px-3 text-sm">-</td><td class="py-3 px-3 text-sm">-</td><td class="py-3 px-3 text-sm">-</td><td class="py-3 px-3 text-sm">-</td><td class="py-3 px-3 text-sm">-</td><td class="py-3 px-3 text-sm">-</td><td class="py-3 px-3 text-sm">-</td><td class="py-3 px-3 text-sm text-right">-</td></tr>
                         <tr><td colspan="10" class="py-4 text-center text-gray-400 text-sm">Tidak ada data Realisasi di periode ini — coba ganti tanggal</td></tr>
                         <?php else: foreach($rows_real as $row):
                             // 2026-11-13: lembur tampil = jam × tarif EFEKTIF MASTER terkini.
@@ -259,5 +284,5 @@ if ($ins_bulanan > 0 && !empty($ttgl1)) {
 #slipSimpleTable_wrapper .dataTables_info{color:#64748b!important;font-size:13px!important}
 </style>
 <script>
-$(document).ready(function(){ if($('#slipSimpleTable').length) $('#slipSimpleTable').DataTable({pageLength:25,language:{search:"Cari:",lengthMenu:"Tampilkan _MENU_ data",info:"Menampilkan _START_ s/d _END_ dari _TOTAL_ data",paginate:{previous:"Prev",next:"Next"}}}); });
+$(document).ready(function(){ var $t=$('#slipSimpleTable'); if($t.length && $t.find('tbody tr').length && $t.find('tbody td[colspan]').length===0) $t.DataTable({pageLength:25,language:{search:"Cari:",lengthMenu:"Tampilkan _MENU_ data",info:"Menampilkan _START_ s/d _END_ dari _TOTAL_ data",paginate:{previous:"Prev",next:"Next"}}}); });
 </script>

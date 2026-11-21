@@ -356,6 +356,16 @@ switch ($mode) {
             echo json_encode(['status'=>'error','message'=>'PIN sudah ada di DB','pin'=>$pin]);
             exit;
         }
+        // 2026-11-21: nama yang sudah ada jangan dibuat ulang dengan PIN berbeda.
+        // Ini yang bikin master duplikat (mis. AKHMAD LOMRI id 310 & 657) dan
+        // nama muncul dobel di Cetak Slip.
+        $cek_nm = $koneksi->query("SELECT id_karyawan FROM ms_karyawan WHERE UPPER(TRIM(nama_karyawan))=UPPER('" . $koneksi->real_escape_string($nama) . "') LIMIT 1");
+        if($cek_nm && $cek_nm->num_rows > 0){
+            $rn = $cek_nm->fetch_assoc();
+            http_response_code(409);
+            echo json_encode(['status'=>'error','message'=>'Nama sudah ada di DB (PIN baru untuk karyawan yang sama)','pin'=>$pin,'id_karyawan'=>(int)$rn['id_karyawan']]);
+            exit;
+        }
         $nama_esc = $koneksi->real_escape_string($nama);
         // Insert minimal ke ms_karyawan (kolom wajib - tanpa bagian)
         $koneksi->query("INSERT INTO ms_karyawan (no_absen, nama_karyawan, status_karyawan, id_departmen, id_jabatan, tempat_lahir, agama, jenis_kelamin, no_ktp, alamat_ktp, alamat_tinggal, no_bpjs, id_jadwal, id_sub_department, tgl_aktif) VALUES ('$pin_esc', '$nama_esc', 'Aktif','1','0','','Islam','Laki-laki','','','','','1','1',CURDATE())");
@@ -504,6 +514,9 @@ switch ($mode) {
             $pin_esc=$koneksi->real_escape_string($pin);
             $cek=$koneksi->query("SELECT id_karyawan FROM ms_karyawan WHERE no_absen='$pin_esc' LIMIT 1");
             if($cek && $cek->num_rows>0){ $skipped[]=$pin; continue; }
+            // 2026-11-21: PIN baru untuk nama yang sudah ada -> jangan bikin duplikat.
+            $cek_nm=$koneksi->query("SELECT id_karyawan FROM ms_karyawan WHERE UPPER(TRIM(nama_karyawan))=UPPER('" . $koneksi->real_escape_string($name) . "') LIMIT 1");
+            if($cek_nm && $cek_nm->num_rows>0){ $skipped[]=$pin; continue; }
             $name_esc=$koneksi->real_escape_string($name);
             // insert minimal tanpa kolom bagian
             $ok=$koneksi->query("INSERT INTO ms_karyawan (no_absen, nama_karyawan, status_karyawan, id_departmen, id_jabatan, tempat_lahir, agama, jenis_kelamin, no_ktp, alamat_ktp, alamat_tinggal, no_bpjs, id_jadwal, id_sub_department, tgl_aktif) VALUES ('$pin_esc', '$name_esc', 'Aktif','1','0','','Islam','Laki-laki','','','','','1','1',CURDATE())");
@@ -563,6 +576,9 @@ switch ($mode) {
             $pin_esc=$koneksi->real_escape_string($pin);
             $cek=$koneksi->query("SELECT id_karyawan FROM ms_karyawan WHERE no_absen='$pin_esc' LIMIT 1");
             if($cek && $cek->num_rows>0) continue;
+            // 2026-11-21: PIN baru untuk nama yang sudah ada -> jangan bikin duplikat.
+            $cek_nm=$koneksi->query("SELECT id_karyawan FROM ms_karyawan WHERE UPPER(TRIM(nama_karyawan))=UPPER('" . $koneksi->real_escape_string($name) . "') LIMIT 1");
+            if($cek_nm && $cek_nm->num_rows>0) continue;
             $name_esc=$koneksi->real_escape_string($name);
             if($koneksi->query("INSERT INTO ms_karyawan (no_absen, nama_karyawan, status_karyawan, id_departmen, id_jabatan, tempat_lahir, agama, jenis_kelamin, no_ktp, alamat_ktp, alamat_tinggal, no_bpjs, id_jadwal, id_sub_department, tgl_aktif) VALUES ('$pin_esc','$name_esc','Aktif','1','0','','Islam','Laki-laki','','','','','1','1',CURDATE())")){
                 $created[]=['pin'=>$pin,'nama'=>$name];
