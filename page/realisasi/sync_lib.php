@@ -73,6 +73,9 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
         $snap_col_ok = true;
         $ck = $koneksi->query("SHOW COLUMNS FROM tb_realisasi_detail LIKE 'no_absen_manual'");
         if ($ck && $ck->num_rows == 0) $koneksi->query("ALTER TABLE tb_realisasi_detail ADD COLUMN no_absen_manual VARCHAR(32) NULL AFTER nama_karyawan_manual");
+        // 2026-11-21 UPAH_OTOMATIS: penanda upah manual (termasuk 0 disengaja).
+        $cku = $koneksi->query("SHOW COLUMNS FROM tb_realisasi_detail LIKE 'upah_manual'");
+        if ($cku && $cku->num_rows == 0) $koneksi->query("ALTER TABLE tb_realisasi_detail ADD COLUMN upah_manual TINYINT(1) NOT NULL DEFAULT 0");
     }
     // 1. Get the realization date and global denda
     $query_real = $koneksi->query("SELECT tgl_realisasi FROM tb_realisasi WHERE id_realisasi = '$id_realisasi'");
@@ -155,7 +158,7 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
     $lembur_per_menit = ceil($lembur_per_jam / 60 * 10) / 10;
 
     // 2. Get all employees in this realization (using LEFT JOIN to include manual employees and RKK fallback)
-    $query_details = $koneksi->query("SELECT RD.id_realisasi_detail, RD.id_karyawan, RD.id_pengganti, RD.id_grup AS grup_id, RD.r_upah as r_upah_lama, RD.lembur_jam, K.no_absen, KP.no_absen AS no_absen_pengganti, KP.nama_karyawan AS nama_pengganti, KP.upah AS upah_master_pengganti, K.nama_karyawan AS nama_karyawan, K.upah as upah_master, RKKD.upah as upah_rkk, RKKD.status_rkk as status_rkk, RD.id_jadwal as detail_jadwal, RKKD.id_jadwal as rkk_jadwal, RD.status_realisasi_detail, 
+    $query_details = $koneksi->query("SELECT RD.id_realisasi_detail, RD.id_karyawan, RD.id_pengganti, RD.id_grup AS grup_id, RD.r_upah as r_upah_lama, RD.upah_manual, RD.nama_karyawan_manual, RD.no_absen_manual, RD.lembur_jam, K.no_absen, KP.no_absen AS no_absen_pengganti, KP.nama_karyawan AS nama_pengganti, KP.upah AS upah_master_pengganti, K.nama_karyawan AS nama_karyawan, K.upah as upah_master, RKKD.upah as upah_rkk, RKKD.status_rkk as status_rkk, RD.id_jadwal as detail_jadwal, RKKD.id_jadwal as rkk_jadwal, RD.status_realisasi_detail, 
                                       COALESCE(J.keterangan, JR.keterangan) as shift_ket,
                                       COALESCE(J.jam_masuk, JR.jam_masuk) as s_masuk, 
                                       COALESCE(J.jam_keluar, JR.jam_keluar) as s_keluar, 
@@ -172,6 +175,24 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
                                       LEFT JOIN tb_jadwal JR ON RKKD.id_jadwal = JR.id_jadwal
                                       LEFT JOIN tb_jadwal JP ON KP.id_jadwal = JP.id_jadwal
                                       WHERE RD.id_realisasi = '$id_realisasi'");
+
+    // 2026-11-21 UPAH_OTOMATIS: peta master untuk baris yang tidak punya relasi
+    // (id_karyawan = 0, mis. KARYAWAN TAMBAHAN). Dipakai untuk mencari upah
+    // dan PIN tap lewat nama/PIN yang persis sama. Satu query per sync.
+    $upah_peta = ['pin' => [], 'nama' => [], 'nama_pin' => []];
+    $qm_peta = $koneksi->query("SELECT nama_karyawan, no_absen, upah FROM ms_karyawan");
+    while ($qm_peta && ($rm_peta = $qm_peta->fetch_assoc())) {
+        $pk_peta = trim((string)($rm_peta['no_absen'] ?? ''));
+        $nk_peta = strtoupper(trim((string)($rm_peta['nama_karyawan'] ?? '')));
+        $up_peta = (float)($rm_peta['upah'] ?? 0);
+        if ($pk_peta !== '') {
+            if ($up_peta > 0) $upah_peta['pin'][$pk_peta] = max($upah_peta['pin'][$pk_peta] ?? 0, $up_peta);
+            // Simpan upah per PIN juga: kalau nama dobel (mis. master duplikat
+            // dengan upah 0), pilih PIN milik record yang upahnya masuk akal.
+            if ($nk_peta !== '') $upah_peta['nama_pin'][$nk_peta][$pk_peta] = max($upah_peta['nama_pin'][$nk_peta][$pk_peta] ?? 0, $up_peta);
+        }
+        if ($nk_peta !== '' && $up_peta > 0) $upah_peta['nama'][$nk_peta] = max($upah_peta['nama'][$nk_peta] ?? 0, $up_peta);
+    }
 
     $count = 0;
     while ($row = $query_details->fetch_assoc()) {
@@ -193,7 +214,27 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
             $idk_row = $id_pengganti;
         }
         $status_rd = $row['status_realisasi_detail'];
-        
+
+        // 2026-11-21 UPAH_OTOMATIS: baris manual tanpa id_karyawan/no_absen tetap
+        // bisa menemukan tap-nya: pakai no_absen_manual, atau PIN master dengan
+        // nama yang persis sama (hanya kalau PIN-nya tunggal, supaya tidak salah orang).
+        if (trim((string)$no_absen) === '') {
+            $pin_manual_rd = trim((string)($row['no_absen_manual'] ?? ''));
+            if ($pin_manual_rd !== '') {
+                $no_absen = $pin_manual_rd;
+            } else {
+                $nm_lookup_rd = strtoupper(trim((string)($row['nama_karyawan_manual'] ?? '')));
+                if ($nm_lookup_rd === '') $nm_lookup_rd = strtoupper(trim((string)($row['nama_karyawan'] ?? '')));
+                if ($nm_lookup_rd !== '' && !empty($upah_peta['nama_pin'][$nm_lookup_rd])) {
+                    // Nama bisa punya beberapa PIN (master duplikat). Pilih yang
+                    // upahnya paling masuk akal (bukan record duplikat upah 0).
+                    $pins_nm_rd = $upah_peta['nama_pin'][$nm_lookup_rd];
+                    arsort($pins_nm_rd);
+                    $no_absen = (string)array_key_first($pins_nm_rd);
+                }
+            }
+        }
+
         // Include manual employees (Previously skipped)
         $shift_ket = $row['shift_ket'] ?? '';
         $is_flexible = is_flexible_shift($shift_ket);
@@ -256,9 +297,14 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
             // id 912 (PIN 1300, ada tap) vs id 920 (PIN 1308, tidak ada tap).
             // Kalau pengganti menunjuk ke duplikat yang TIDAK ada tap-nya,
             // cari tap di PIN milik master lain yang namanya sama.
-            if (empty($raw_logs) && $idk_row > 0) {
+            if (empty($raw_logs) && ($idk_row > 0 || trim((string)($row['nama_karyawan_manual'] ?? '')) !== '')) {
                 $nm_cari = trim((string)($row['nama_pengganti'] ?? ''));
-                if ($id_pengganti <= 0) $nm_cari = trim((string)($row['nama_karyawan'] ?? ''));
+                if ($id_pengganti <= 0) {
+                    $nm_cari = trim((string)($row['nama_karyawan'] ?? ''));
+                    // 2026-11-21: baris manual (id_karyawan=0) tetap dicarikan
+                    // tap lewat nama di master.
+                    if ($nm_cari === '') $nm_cari = trim((string)($row['nama_karyawan_manual'] ?? ''));
+                }
                 if ($nm_cari !== '') {
                     $nm_e = $koneksi->real_escape_string($nm_cari);
                     $tgl_e = $koneksi->real_escape_string($tgl_real);
@@ -569,6 +615,17 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
         $status_rkk = $row['status_rkk'] ?? '';
         $upah_master = (float)($row['upah_master'] ?? 0);
         $r_upah_lama = (float)($row['r_upah_lama'] ?? 0);
+        // 2026-11-21 UPAH_OTOMATIS: baris yang tidak terhubung ke master/RKK
+        // (id_karyawan = 0, mis. KARYAWAN TAMBAHAN manual) dicarikan upah lewat
+        // PIN (no_absen_manual) atau nama yang persis sama di ms_karyawan.
+        // Peta dibuat sekali per request supaya tidak query per baris.
+        if ($upah_rkk <= 0 && $upah_master <= 0) {
+            $pin_rd = trim((string)($row['no_absen_manual'] ?? ''));
+            $nm_rd = strtoupper(trim((string)($row['nama_karyawan_manual'] ?? '')));
+            if ($nm_rd === '') $nm_rd = strtoupper(trim((string)($row['nama_karyawan'] ?? '')));
+            if ($pin_rd !== '' && isset($upah_peta['pin'][$pin_rd])) $upah_master = $upah_peta['pin'][$pin_rd];
+            if ($upah_master <= 0 && $nm_rd !== '' && isset($upah_peta['nama'][$nm_rd])) $upah_master = $upah_peta['nama'][$nm_rd];
+        }
         if ($status_rkk === 'Digantikan') {
             $upah_pakai = 0;
         } elseif ($upah_rkk > 0) {
@@ -581,7 +638,14 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
         $wage_update_sql = "";
         $status_update_sql = "status_realisasi_detail = 2";
         $status_enum = "Hadir";
-        if ($is_total_missing) {
+        $upah_manual_rd = (int)($row['upah_manual'] ?? 0);
+        if ($upah_manual_rd === 1) {
+            // 2026-11-21 UPAH_OTOMATIS: upah diisi manual (termasuk 0 yang
+            // disengaja) -> jangan pernah ditimpa sync.
+            $wage_update_sql = "";
+            $status_enum = $is_total_missing ? "Tidak Hadir" : "Hadir";
+            $status_update_sql = ((int)($status_rd ?? 0) === 1) ? "status_realisasi_detail = 1" : "status_realisasi_detail = 2";
+        } elseif ($is_total_missing) {
             $wage_update_sql = "r_upah = 0,";
             $status_enum = "Tidak Hadir";
         } elseif ($id_pengganti > 0) {
@@ -598,11 +662,15 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
             $status_enum = "Hadir";
             $status_update_sql = ((int)($status_rd ?? 0) === 1) ? "status_realisasi_detail = 1" : "status_realisasi_detail = 2";
         } elseif ((int)($status_rd ?? 0) === 1) {
-            // Manual: upah dipertahankan, status tetap 1 supaya sync berikutnya juga tidak menimpa.
-            $wage_update_sql = "";
+            // Manual tanpa penanda upah_manual: upah yang sudah > 0 dipertahankan
+            // (tidak menimpa input lama), TAPI kalau masih 0 diisi otomatis dari
+            // RKK/master/nama supaya tidak nyangkut 0 selamanya.
+            $wage_update_sql = ($r_upah_lama <= 0 && $upah_pakai > 0)
+                ? "r_upah = '" . (int)round($upah_pakai) . "',"
+                : "";
             $status_update_sql = "status_realisasi_detail = 1";
         } else {
-            $wage_update_sql = "r_upah = '$upah_pakai',";
+            $wage_update_sql = "r_upah = '" . (int)round($upah_pakai) . "',";
         }
 
         // 2026-11-10: Baris diganti yang penggantinya TIDAK finger hari itu

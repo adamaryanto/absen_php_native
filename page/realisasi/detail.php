@@ -20,6 +20,13 @@ $checkJabCol = $koneksi->query("SHOW COLUMNS FROM tb_realisasi_detail LIKE 'id_j
 if ($checkJabCol && $checkJabCol->num_rows == 0) {
     $koneksi->query("ALTER TABLE tb_realisasi_detail ADD COLUMN id_jabatan INT NOT NULL DEFAULT 0");
 }
+// 2026-11-21 UPAH_OTOMATIS: penanda upah diisi manual (termasuk 0 yang
+// disengaja). Kalau upah_manual = 1, Tarik Data TIDAK boleh mengubah r_upah.
+// Kalau 0, r_upah yang masih kosong akan diisi otomatis dari RKK/master.
+$checkUpahManualCol = $koneksi->query("SHOW COLUMNS FROM tb_realisasi_detail LIKE 'upah_manual'");
+if ($checkUpahManualCol && $checkUpahManualCol->num_rows == 0) {
+    $koneksi->query("ALTER TABLE tb_realisasi_detail ADD COLUMN upah_manual TINYINT(1) NOT NULL DEFAULT 0");
+}
 
 // Helper waktu + toleransi terpusat (SAMA kayak tarik data & kelola)
 require_once __DIR__ . '/sync_lib.php';
@@ -642,6 +649,10 @@ if (!function_exists('rupiah')) {
 
 <?php
 if (isset($_POST['simpan'])) {
+    // 2026-11-21 UPAH_OTOMATIS: hidden tupah_manual=1 hanya terisi kalau admin
+    // benar-benar mengetik nilai upah (termasuk 0). Kalau tidak, pertahankan
+    // status manual yang sudah tersimpan.
+    $tupah_manual_flag = !empty($_POST['tupah_manual']) ? 1 : (int)($datadetail['upah_manual'] ?? 0);
     // 2026-11-20 UPAH_SEMUA_ROLE: role OS hanya boleh ubah UPAH POKOK.
     // Ganti Karyawan tetap DIMATIKAN untuk OS (case 1, 2026-11-12); field lain
     // (shift, jam, potongan, lembur, hasil kerja, Bagian, Posisi) diabaikan.
@@ -668,8 +679,14 @@ if (isset($_POST['simpan'])) {
         } else {
             $is_total_missing_os = (empty($datadetail['ra_masuk']) || $datadetail['ra_masuk'] == '00:00:00') && (empty($datadetail['ra_keluar']) || $datadetail['ra_keluar'] == '00:00:00');
             if ($is_total_missing_os) {
-                $tupah_os = 0;
-            } elseif ($tupah_os <= 0 && empty($_POST['tupah_manual']) && (float)($datadetail['r_upah'] ?? 0) > 0) {
+                // 2026-11-21: jangan paksa 0 kalau admin tidak mengetik upah.
+                // Tap bisa saja belum ketarik; simpan nilai yang ada supaya
+                // tidak nyangkut 0 permanen.
+                if (!$tupah_manual_flag && $tupah_os <= 0) {
+                    $tupah_os = (float)($datadetail['r_upah'] ?? 0);
+                    if ($tupah_os <= 0 && !empty($datadetail['upah_master'])) $tupah_os = (float)$datadetail['upah_master'];
+                }
+            } elseif ($tupah_os <= 0 && !$tupah_manual_flag) {
                 $tupah_os = (float)($datadetail['r_upah'] ?? 0);
                 if ($tupah_os <= 0 && !empty($datadetail['upah_master'])) $tupah_os = (float)$datadetail['upah_master'];
             }
@@ -677,7 +694,7 @@ if (isset($_POST['simpan'])) {
         $now_os = date("Y-m-d H:i:s");
         // 2026-11-20 UPAH_NOL2: kalau upah 0, denda ikut 0 supaya total tidak minus.
         $pot0_os = ($tupah_os <= 0) ? ", r_potongan_telat = 0, r_potongan_istirahat_awal = 0, r_potongan_istirahat_telat = 0, r_potongan_pulang = 0, r_potongan_tidak_lengkap = 0" : "";
-        $koneksi->query("UPDATE tb_realisasi_detail SET r_upah = $tupah_os$pot0_os, status_realisasi_detail = 1, r_update = '$now_os' WHERE id_realisasi_detail = '$id'");
+        $koneksi->query("UPDATE tb_realisasi_detail SET r_upah = $tupah_os, upah_manual = $tupah_manual_flag$pot0_os, status_realisasi_detail = 1, r_update = '$now_os' WHERE id_realisasi_detail = '$id'");
         echo '<!DOCTYPE html><html><head><script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script></head><body><script>
             Swal.fire({ icon: "success", title: "Berhasil", text: "Upah Pokok berhasil disimpan.", confirmButtonColor: "#2563eb", confirmButtonText: "OK" }).then(() => { window.location.href = "?page=realisasi&aksi=detail&id=' . $id . '"; });
         </script></body></html>';
@@ -808,7 +825,7 @@ if (isset($_POST['simpan'])) {
                             $ik_batal = !empty($r_jw_bt['istirahat_keluar']) ? $r_jw_bt['istirahat_keluar'] : '00:00:00';
                         }
                     }
-                    $koneksi->query("UPDATE tb_realisasi_detail SET id_pengganti = NULL, ra_masuk = '00:00:00', ra_keluar = '00:00:00', ra_istirahat_masuk = '00:00:00', ra_istirahat_keluar = '00:00:00', r_jam_masuk = '$jm_batal', r_jam_keluar = '$jk_batal', r_istirahat_masuk = '$im_batal', r_istirahat_keluar = '$ik_batal', lembur_jam = '0', lembur = '0', r_potongan_telat = '0', r_potongan_istirahat_awal = '0', r_potongan_istirahat_telat = '0', r_potongan_pulang = '0', r_potongan_tidak_lengkap = '0', r_upah = 0, r_status = 'Tidak Hadir', status_realisasi_detail = 2, r_update = '$now_tk' WHERE id_realisasi_detail = '$id'");
+                    $koneksi->query("UPDATE tb_realisasi_detail SET id_pengganti = NULL, ra_masuk = '00:00:00', ra_keluar = '00:00:00', ra_istirahat_masuk = '00:00:00', ra_istirahat_keluar = '00:00:00', r_jam_masuk = '$jm_batal', r_jam_keluar = '$jk_batal', r_istirahat_masuk = '$im_batal', r_istirahat_keluar = '$ik_batal', lembur_jam = '0', lembur = '0', r_potongan_telat = '0', r_potongan_istirahat_awal = '0', r_potongan_istirahat_telat = '0', r_potongan_pulang = '0', r_potongan_tidak_lengkap = '0', r_upah = 0, upah_manual = 0, r_status = 'Tidak Hadir', status_realisasi_detail = 2, r_update = '$now_tk' WHERE id_realisasi_detail = '$id'");
                 }
             }
         }
@@ -830,15 +847,19 @@ if (isset($_POST['simpan'])) {
                 } else {
                     $is_total_missing_hr = (empty($datadetail['ra_masuk']) || $datadetail['ra_masuk'] == '00:00:00') && (empty($datadetail['ra_keluar']) || $datadetail['ra_keluar'] == '00:00:00');
                     if ($is_total_missing_hr) {
-                        $tupah_hr = 0;
-                    } elseif ($tupah_hr <= 0 && empty($_POST['tupah_manual']) && (float)($datadetail['r_upah'] ?? 0) > 0) {
+                        // 2026-11-21: sama seperti role OS - jangan paksa 0.
+                        if (!$tupah_manual_flag && $tupah_hr <= 0) {
+                            $tupah_hr = (float)($datadetail['r_upah'] ?? 0);
+                            if ($tupah_hr <= 0 && !empty($datadetail['upah_master'])) $tupah_hr = (float)$datadetail['upah_master'];
+                        }
+                    } elseif ($tupah_hr <= 0 && !$tupah_manual_flag) {
                         $tupah_hr = (float)($datadetail['r_upah'] ?? 0);
                         if ($tupah_hr <= 0 && !empty($datadetail['upah_master'])) $tupah_hr = (float)$datadetail['upah_master'];
                     }
                 }
                 // 2026-11-20 UPAH_NOL2: kalau upah 0, denda ikut 0 supaya total tidak minus.
                 $pot0_hr = ($tupah_hr <= 0) ? ", r_potongan_telat = 0, r_potongan_istirahat_awal = 0, r_potongan_istirahat_telat = 0, r_potongan_pulang = 0, r_potongan_tidak_lengkap = 0" : "";
-                $koneksi->query("UPDATE tb_realisasi_detail SET r_upah = $tupah_hr$pot0_hr, status_realisasi_detail = 1, r_update = '$now_tk' WHERE id_realisasi_detail = '$id'");
+                $koneksi->query("UPDATE tb_realisasi_detail SET r_upah = $tupah_hr, upah_manual = $tupah_manual_flag$pot0_hr, status_realisasi_detail = 1, r_update = '$now_tk' WHERE id_realisasi_detail = '$id'");
             }
         }
         if ($tukar_err_tk !== '') {
@@ -858,7 +879,7 @@ if (isset($_POST['simpan'])) {
     // 2026-11-20 UPAH_NOL5: PHP harus membaca hidden tupah_manual (dari JS).
     // Sebelumnya variabel ini TIDAK pernah diisi -> 0 yang diketik selalu
     // kena fallback ke r_upah lama / upah master di bawah.
-    $tupah_manual = !empty($_POST['tupah_manual']) ? 1 : 0;
+    $tupah_manual = !empty($_POST['tupah_manual']) ? 1 : (int)($datadetail['upah_manual'] ?? 0);
     $tshift = (int)($_POST['tshift'] ?? 0);
     $tpotlainnya = (float)($_POST['tpotlainnya'] ?? 0);
     $tpottelat = (float)($_POST['tpottelat'] ?? 0);
@@ -1027,7 +1048,13 @@ if (isset($_POST['simpan'])) {
             }
             $tstatus_hadir = 'Hadir';
         } else {
-            $tupah = 0;
+            // 2026-11-21: jangan paksa 0 kalau admin tidak mengetik upah.
+            // Tap bisa belum ketarik; pertahankan upah yang sudah ada supaya
+            // tidak nyangkut 0 permanen.
+            if (!$tupah_manual && $tupah <= 0) {
+                $tupah = (float)($datadetail['r_upah'] ?? 0);
+                if ($tupah <= 0 && !empty($datadetail['upah_master'])) $tupah = (float)$datadetail['upah_master'];
+            }
             $tstatus_hadir = 'Tidak Hadir';
         }
     } else {
@@ -1132,6 +1159,7 @@ if (isset($_POST['simpan'])) {
         id_jabatan = $posisi_id_save,
         id_pengganti = $vganti,
         r_upah = $tupah, 
+        upah_manual = $tupah_manual,
         id_jadwal = $tshift,
         r_jam_masuk = '$s_masuk',
         r_jam_keluar = '$s_keluar',

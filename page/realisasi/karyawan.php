@@ -31,6 +31,19 @@ if (isset($_POST['simpan_karyawan'])) {
     $id_gol      = intval($_POST['id_golongan'] ?? 0);
     $id_jadwal   = $_POST['id_jadwal'];
 
+    // 2026-11-21 UPAH_OTOMATIS: kalau upah di form kosong/0, ambil dari master
+    // (berdasarkan karyawan yang dipilih, atau nama persis kalau diketik manual).
+    // Jadi baris KARYAWAN TAMBAHAN tidak lagi tersimpan dengan upah 0.
+    if ($upah <= 0) {
+        if ($id_karyawan_pick > 0) {
+            $qu = $koneksi->query("SELECT upah FROM ms_karyawan WHERE id_karyawan = '$id_karyawan_pick' LIMIT 1");
+            if ($qu && ($ru = $qu->fetch_assoc())) $upah = (float)$ru['upah'];
+        } else {
+            $qu = $koneksi->query("SELECT upah FROM ms_karyawan WHERE UPPER(TRIM(nama_karyawan)) = UPPER(TRIM('$nama_manual')) AND upah > 0 ORDER BY upah DESC LIMIT 1");
+            if ($qu && ($ru = $qu->fetch_assoc())) $upah = (float)$ru['upah'];
+        }
+    }
+
     // Handle Tags untuk Dept & Sub
     if (!empty($id_dept) && !is_numeric($id_dept)) {
         $name_dept = $koneksi->real_escape_string($id_dept);
