@@ -235,6 +235,26 @@ if (isset($_GET['id'])) {
         }
     }
 
+    // 2026-11-21: borongan juga dikenali dari golongan/anggota grup, bukan cuma
+    // dari rincian borongan yang sudah ada. Baris borongan tidak ikut upah master.
+    $is_borongan_row = !empty($is_borongan_detail);
+    if (!$is_borongan_row && (int)($datadetail['id_karyawan'] ?? 0) > 0) {
+        $idk_bor = (int)$datadetail['id_karyawan'];
+        $q_bor_row = $koneksi->query("SELECT 1 FROM ms_karyawan K
+            LEFT JOIN ms_golongan G ON G.id_golongan = K.id_golongan
+            WHERE K.id_karyawan = '$idk_bor'
+              AND UPPER(TRIM(COALESCE(G.golongan, ''))) = 'BORONGAN' LIMIT 1");
+        if ($q_bor_row && $q_bor_row->num_rows > 0) $is_borongan_row = true;
+        if (!$is_borongan_row && (int)($datadetail['id_grup'] ?? 0) > 0) {
+            $idg_bor = (int)$datadetail['id_grup'];
+            $q_bor_grp = $koneksi->query("SELECT 1 FROM ms_grup_borongan G
+                LEFT JOIN ms_grup_borongan_anggota GA ON GA.id_grup = G.id_grup AND GA.id_karyawan = '$idk_bor'
+                WHERE G.id_grup = '$idg_bor'
+                  AND (G.is_borongan = 1 OR GA.is_borongan = 1) LIMIT 1");
+            if ($q_bor_grp && $q_bor_grp->num_rows > 0) $is_borongan_row = true;
+        }
+    }
+
     // Tentukan data yang digunakan untuk kalkulasi potongan (Input ra_ atau Log Mesin)
     $jamMasukRealisasi = !empty($datadetail['ra_masuk']) ? $datadetail['ra_masuk'] : ($datadetailabsen['absen_masuk'] ?? '');
     $jamKeluarRealisasi = !empty($datadetail['ra_keluar']) ? $datadetail['ra_keluar'] : ($datadetailabsen['absen_keluar'] ?? '');
@@ -672,7 +692,7 @@ if (isset($_POST['simpan'])) {
         // Manual (status=1) supaya Tarik Data tidak menimpa upah ini.
         $tupah_os = (float)($_POST['tupah'] ?? 0);
         if ($tupah_os < 0) $tupah_os = 0;
-        if (!empty($is_borongan_detail)) {
+        if (!empty($is_borongan_row)) {
             $tupah_os = 0;
         } elseif ($tukar_cur_os > 0) {
             $tupah_os = 0;
@@ -840,7 +860,7 @@ if (isset($_POST['simpan'])) {
             if ($tukar_new_tk === $tukar_cur_tk) {
                 $tupah_hr = (float)($_POST['tupah'] ?? 0);
                 if ($tupah_hr < 0) $tupah_hr = 0;
-                if (!empty($is_borongan_detail)) {
+                if (!empty($is_borongan_row)) {
                     $tupah_hr = 0;
                 } elseif ($tukar_cur_tk > 0) {
                     $tupah_hr = 0;
@@ -1050,8 +1070,9 @@ if (isset($_POST['simpan'])) {
         } else {
             // 2026-11-21: jangan paksa 0 kalau admin tidak mengetik upah.
             // Tap bisa belum ketarik; pertahankan upah yang sudah ada supaya
-            // tidak nyangkut 0 permanen.
-            if (!$tupah_manual && $tupah <= 0) {
+            // tidak nyangkut 0 permanen. Baris BORONGAN dikecualikan (upah dari
+            // rincian qty x tarif, default 0).
+            if (!$tupah_manual && $tupah <= 0 && empty($is_borongan_row)) {
                 $tupah = (float)($datadetail['r_upah'] ?? 0);
                 if ($tupah <= 0 && !empty($datadetail['upah_master'])) $tupah = (float)$datadetail['upah_master'];
             }
@@ -1083,7 +1104,7 @@ if (isset($_POST['simpan'])) {
     // Pengaman server untuk baris borongan (tanpa tukar): upah tetap 0 di sini,
     // berapapun nilai tupah yang dikirim, karena upah borongan ikut total borongan.
     // (Kalau ada tukar, rincian borongan sudah dihapus di atas, jadi bukan borongan lagi.)
-    if ($tukar_new <= 0 && !empty($is_borongan_detail) && !$tupah_manual) {
+    if ($tukar_new <= 0 && !empty($is_borongan_row) && !$tupah_manual) {
         $tupah = 0;
     }
 

@@ -166,7 +166,10 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
                                       COALESCE(J.istirahat_keluar, JR.istirahat_keluar) as s_ist_keluar,
                                       KP.id_jadwal as id_jadwal_pengganti,
                                       JP.jam_masuk as s_masuk_pg, JP.jam_keluar as s_keluar_pg,
-                                      JP.istirahat_masuk as s_ist_masuk_pg, JP.istirahat_keluar as s_ist_keluar_pg
+                                      JP.istirahat_masuk as s_ist_masuk_pg, JP.istirahat_keluar as s_ist_keluar_pg,
+                                      (UPPER(TRIM(COALESCE(GL.golongan, ''))) = 'BORONGAN'
+                                       OR COALESCE(GA.is_borongan, 0) = 1
+                                       OR COALESCE(GB.is_borongan, 0) = 1) as is_borongan_row
                                       FROM tb_realisasi_detail RD
                                       LEFT JOIN ms_karyawan K ON RD.id_karyawan = K.id_karyawan
                                       LEFT JOIN ms_karyawan KP ON RD.id_pengganti = KP.id_karyawan
@@ -174,6 +177,9 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
                                       LEFT JOIN tb_jadwal J ON RD.id_jadwal = J.id_jadwal
                                       LEFT JOIN tb_jadwal JR ON RKKD.id_jadwal = JR.id_jadwal
                                       LEFT JOIN tb_jadwal JP ON KP.id_jadwal = JP.id_jadwal
+                                      LEFT JOIN ms_golongan GL ON K.id_golongan = GL.id_golongan
+                                      LEFT JOIN ms_grup_borongan GB ON RD.id_grup = GB.id_grup
+                                      LEFT JOIN ms_grup_borongan_anggota GA ON GA.id_grup = RD.id_grup AND GA.id_karyawan = RD.id_karyawan
                                       WHERE RD.id_realisasi = '$id_realisasi'");
 
     // 2026-11-21 UPAH_OTOMATIS: peta master untuk baris yang tidak punya relasi
@@ -214,6 +220,8 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
             $idk_row = $id_pengganti;
         }
         $status_rd = $row['status_realisasi_detail'];
+        // 2026-11-21: baris borongan upahnya dari rincian qty x tarif, bukan master.
+        $is_borongan_row = !empty($row['is_borongan_row']);
 
         // 2026-11-21 UPAH_OTOMATIS: baris manual tanpa id_karyawan/no_absen tetap
         // bisa menemukan tap-nya: pakai no_absen_manual, atau PIN master dengan
@@ -665,7 +673,9 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
             // Manual tanpa penanda upah_manual: upah yang sudah > 0 dipertahankan
             // (tidak menimpa input lama), TAPI kalau masih 0 diisi otomatis dari
             // RKK/master/nama supaya tidak nyangkut 0 selamanya.
-            $wage_update_sql = ($r_upah_lama <= 0 && $upah_pakai > 0)
+            // 2026-11-21: baris BORONGAN dikecualikan — upahnya dari rincian
+            // qty x tarif, default 0 kalau rincian belum diisi (jangan ikut master).
+            $wage_update_sql = (!$is_borongan_row && $r_upah_lama <= 0 && $upah_pakai > 0)
                 ? "r_upah = '" . (int)round($upah_pakai) . "',"
                 : "";
             $status_update_sql = "status_realisasi_detail = 1";

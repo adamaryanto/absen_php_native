@@ -31,10 +31,22 @@ if (isset($_POST['simpan_karyawan'])) {
     $id_gol      = intval($_POST['id_golongan'] ?? 0);
     $id_jadwal   = $_POST['id_jadwal'];
 
+    // 2026-11-21: baris BORONGAN tidak ikut upah master — upahnya dari rincian
+    // qty x tarif (default 0 kalau belum diisi).
+    $is_borongan_form = false;
+    if ($id_gol > 0) {
+        $qg_bor = $koneksi->query("SELECT golongan FROM ms_golongan WHERE id_golongan = '$id_gol' LIMIT 1");
+        if ($qg_bor && ($rg_bor = $qg_bor->fetch_assoc()) && strtoupper(trim((string)$rg_bor['golongan'])) === 'BORONGAN') $is_borongan_form = true;
+    }
+    if (!$is_borongan_form && $id_grup_pick > 0) {
+        $qgb_bor = $koneksi->query("SELECT is_borongan FROM ms_grup_borongan WHERE id_grup = '$id_grup_pick' LIMIT 1");
+        if ($qgb_bor && ($rgb_bor = $qgb_bor->fetch_assoc()) && (int)$rgb_bor['is_borongan'] === 1) $is_borongan_form = true;
+    }
+
     // 2026-11-21 UPAH_OTOMATIS: kalau upah di form kosong/0, ambil dari master
     // (berdasarkan karyawan yang dipilih, atau nama persis kalau diketik manual).
     // Jadi baris KARYAWAN TAMBAHAN tidak lagi tersimpan dengan upah 0.
-    if ($upah <= 0) {
+    if ($upah <= 0 && !$is_borongan_form) {
         if ($id_karyawan_pick > 0) {
             $qu = $koneksi->query("SELECT upah FROM ms_karyawan WHERE id_karyawan = '$id_karyawan_pick' LIMIT 1");
             if ($qu && ($ru = $qu->fetch_assoc())) $upah = (float)$ru['upah'];
