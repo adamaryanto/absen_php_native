@@ -12,7 +12,11 @@ $os_id_kelola = os_is_os() ? os_id() : 0;
 // Baris digantikan TIDAK ikut tampil di OS pengganti — itu BOCOR (OS lain lihat baris
 // + tap + jam orang OS lain). Pengganti terlihat lewat baris Tambahan-nya sendiri di
 // OS-nya. Samakan dengan Excel ($os_where_ex) & dedupe $qk yang sudah benar.
-$os_where_kelola = os_is_os() ? " AND COALESCE(NULLIF(B.id_os_dhk, 0), A.id_os_dhk) = $os_id_kelola" : "";
+// 2026-11-23 (BUKA_TANPA_BOCOR): baris digantikan ikut tampil di OS pengganti
+// (bukan cuma OS karyawan asli) supaya pengganti bisa lihat "A menggantikan B".
+$os_where_kelola = os_is_os() ? " AND (COALESCE(NULLIF(B.id_os_dhk, 0), A.id_os_dhk) = $os_id_kelola"
+    . " OR (A.id_pengganti IS NOT NULL AND A.id_pengganti > 0 AND PG.id_os_dhk = $os_id_kelola)"
+    . " OR RKKPG.os_pg = $os_id_kelola)" : "";
 // Self-heal master grup + kolom id_grup (penting di DB lama sebelum query utama jalan)
 include_once __DIR__ . '/../grup_borongan/_setup.php';
 // Kolom pengganti (tukar karyawan: nama tetap, tercatat "Digantikan oleh ...")
@@ -126,6 +130,7 @@ if (isset($_GET['id'])) {
         COALESCE(JB.jabatan, JB_PG.jabatan) as nama_sub_department,
         C.tgl_realisasi, 
         COALESCE(O.OS_DHK, O_M.OS_DHK) as label_os,
+        COALESCE(NULLIF(B.id_os_dhk, 0), A.id_os_dhk) as os_row_id,
         COALESCE(G_M.golongan, G.golongan) as label_gol,
         (UPPER(TRIM(COALESCE(G.golongan, ''))) = 'BORONGAN' OR UPPER(TRIM(COALESCE(G_M.golongan, ''))) = 'BORONGAN') as is_golongan_borongan,
         RD.status_rkk,
@@ -675,7 +680,7 @@ function bulkSavePenalties($koneksi, $id_realisasi)
                                 }
                                 // Baris pertama per orang (MIN id) yang dihitung; baris rangkap (beda grup, nama sama) tampil tapi tidak dijumlah
                                 $keep_ids = []; $cnt_person = [];
-                                $qk = $koneksi->query("SELECT MIN(RD.id_realisasi_detail) AS k, COUNT(*) AS c, IF(RD.id_karyawan = 0, CONCAT('M:', IFNULL(RD.nama_karyawan_manual, '')), CONCAT('K:', RD.id_karyawan)) AS pk FROM tb_realisasi_detail RD LEFT JOIN ms_karyawan BKQ ON BKQ.id_karyawan = RD.id_karyawan LEFT JOIN tb_rkk_detail RKD ON RD.id_rkk_detail = RKD.id_rkk_detail WHERE RD.id_realisasi = '$idrealisasi' AND (RKD.id_rkk_detail IS NULL OR RKD.status_rkk != 'Digantikan')" . (os_is_os() ? " AND COALESCE(NULLIF(BKQ.id_os_dhk, 0), RD.id_os_dhk) = $os_id_kelola" : "") . " GROUP BY pk");
+                                $qk = $koneksi->query("SELECT MIN(RD.id_realisasi_detail) AS k, COUNT(*) AS c, IF(RD.id_karyawan = 0, CONCAT('M:', IFNULL(RD.nama_karyawan_manual, '')), CONCAT('K:', RD.id_karyawan)) AS pk FROM tb_realisasi_detail RD LEFT JOIN ms_karyawan BKQ ON BKQ.id_karyawan = RD.id_karyawan LEFT JOIN ms_karyawan PGQ ON PGQ.id_karyawan = RD.id_pengganti LEFT JOIN tb_rkk_detail RKD ON RD.id_rkk_detail = RKD.id_rkk_detail WHERE RD.id_realisasi = '$idrealisasi' AND (RKD.id_rkk_detail IS NULL OR RKD.status_rkk != 'Digantikan')" . (os_is_os() ? " AND (COALESCE(NULLIF(BKQ.id_os_dhk, 0), RD.id_os_dhk) = $os_id_kelola OR (RD.id_pengganti IS NOT NULL AND RD.id_pengganti > 0 AND PGQ.id_os_dhk = $os_id_kelola))" : "") . " GROUP BY pk");
                                 while ($qk && ($rkk = $qk->fetch_assoc())) { $keep_ids[(int)$rkk['k']] = true; $cnt_person[$rkk['pk']] = (int)$rkk['c']; }
                                 // 2026-11-17 (BALANCE7 TANPA_BOCOR): Total & jumlah karyawan dihitung
                                 // dari DB dengan rumus BALANCE3 (sama kayak Rekap & list
@@ -866,10 +871,9 @@ function bulkSavePenalties($koneksi, $id_realisasi)
                                     // 2026-11-12 (case 1): kolom OS/DHK baris digantikan ikut OS
                                     // PENGGANTI (OS baru), bukan OS karyawan asli. Yang kerja &
                                     // dibayar adalah pengganti, jadi OS-nya yang tampil di kolom.
-                                    // 2026-11-17 (TANPA_BOCOR): di role OS JANGAN ikut OS pengganti
-                                    // — kolom OS harus tetap OS karyawan baris ini, supaya OS lain
-                                    // tidak bocor ke tampilan OS ini.
-                                    if ($is_replaced && !os_is_os()) {
+                                    // 2026-11-23 (BUKA_TANPA_BOCOR): berlaku juga di role OS —
+                                    // OS pengganti tampil di kolom OS/DHK walau beda role.
+                                    if ($is_replaced) {
                                         $os_baru_lbl = trim((string)($data['os_pengganti_lbl'] ?? ''));
                                         if ($os_baru_lbl === '' && !empty($data['id_rkk_detail']) && isset($map_digantikan_os[(int)$data['id_rkk_detail']])) {
                                             $os_baru_lbl = trim((string)$map_digantikan_os[(int)$data['id_rkk_detail']]);
@@ -1003,10 +1007,25 @@ function bulkSavePenalties($koneksi, $id_realisasi)
                                     // 2026-11-15 (KTP di bawah nama): KTP mengikuti nama karyawan
                                     // baris ini (termasuk baris Digantikan dan Tambahan Pengganti).
                                     $ktp_nama_utama = (string)($data['ktp_tampil'] ?? '');
-                                    // Sembunyikan nama orang OS lain di role OS (TANPA_BOCOR).
-                                    $sembunyi_nm_pg = os_is_os() && $is_replaced && $os_pg_id_eff > 0 && $os_pg_id_eff !== $os_id_kelola;
+                                    // 2026-11-23 (BUKA_TANPA_BOCOR): nama + OS pengganti ditampilkan
+                                    // lintas OS (permintaan). Baris digantikan juga tampil di OS
+                                    // pengganti (lihat $os_where_kelola); bila login = OS pengganti,
+                                    // nama pengganti jadi nama utama "(A menggantikan B)".
+                                    $sembunyi_nm_pg = false;
+                                    $sembunyi_nm_ganti = false;
+                                    $nama_pg_disp = trim((string)(!empty($data['digantikan_oleh']) ? $data['digantikan_oleh'] : ($data['pengganti_langsung'] ?? '')));
+                                    $os_pg_lbl_disp = trim((string)($data['os_pengganti_lbl'] ?? ''));
+                                    if ($os_pg_lbl_disp === '' && !empty($data['id_rkk_detail']) && isset($map_digantikan_os[(int)$data['id_rkk_detail']])) {
+                                        $os_pg_lbl_disp = trim((string)$map_digantikan_os[(int)$data['id_rkk_detail']]);
+                                    }
+                                    $os_row_id = (int)($data['os_row_id'] ?? 0);
+                                    $os_row_lbl_disp = trim((string)($data['label_os'] ?? ''));
+                                    $is_from_pg_os = os_is_os() && $is_replaced && $os_pg_id_eff > 0 && $os_pg_id_eff === $os_id_kelola && $os_row_id > 0 && $os_row_id !== $os_id_kelola;
+                                    if ($is_from_pg_os) {
+                                        $ktp_nama_utama = trim((string)($data['ktp_pengganti'] ?? ''));
+                                        if ($os_pg_lbl_disp !== '') $data['label_os'] = $os_pg_lbl_disp;
+                                    }
                                     $_mk_ganti = ((int)($data['id_karyawan'] ?? 0)) . '|' . (int)($data['id_rkk'] ?? 0);
-                                    $sembunyi_nm_ganti = os_is_os() && !empty($data['menggantikan']) && isset($map_menggantikan_os[$_mk_ganti]) && (int)$map_menggantikan_os[$_mk_ganti] !== $os_id_kelola;
                                     $pkey_k = ((int)($data['id_karyawan'] ?? 0) !== 0) ? ('K:' . (int)$data['id_karyawan']) : ('M:' . trim((string)($data['nama_karyawan_manual'] ?? '')));
                                     $data['_rangkap'] = !isset($keep_ids[(int)$data['id_realisasi_detail']]) && (($cnt_person[$pkey_k] ?? 0) > 1);
                                 ?>
@@ -1014,13 +1033,17 @@ function bulkSavePenalties($koneksi, $id_realisasi)
                                         <td data-label="No"><?php echo $no; ?></td>
                                         <td data-label="Nama Sesuai KTP">
                                             <strong>
-                                                <?php echo $data['nama_tampil']; ?>
-                                                <?php if (!empty($data['menggantikan'])) echo " <span class='text-blue-600 font-bold'>(Menggantikan" . ($sembunyi_nm_ganti ? "" : " " . $data['menggantikan']) . ")</span>"; ?>
-                                                <?php if (!empty($data['menggantikan']) && !empty($data['digantikan_oleh'])) echo " &"; ?>
-                                                <?php if (!empty($data['digantikan_oleh'])) echo " <span class='text-red-600 font-bold'>(Digantikan oleh" . ($sembunyi_nm_pg ? "" : " " . $data['digantikan_oleh']) . ")</span>"; ?>
-                                                <?php if (empty($data['digantikan_oleh']) && !empty($data['pengganti_langsung'])) echo " <span class='text-red-600 font-bold'>(Digantikan oleh" . ($sembunyi_nm_pg ? "" : " " . $data['pengganti_langsung']) . ")</span>"; ?>
+                                                <?php if ($is_from_pg_os): ?>
+                                                    <?php echo $nama_pg_disp !== '' ? htmlspecialchars($nama_pg_disp) : $data['nama_tampil']; ?>
+                                                    <span class="text-blue-600 font-bold">(Menggantikan <?php echo htmlspecialchars($data['nama_tampil']); ?>)</span>
+                                                <?php else: ?>
+                                                    <?php echo $data['nama_tampil']; ?>
+                                                    <?php if (!empty($data['menggantikan'])) echo " <span class='text-blue-600 font-bold'>(Menggantikan " . htmlspecialchars($data['menggantikan']) . ")</span>"; ?>
+                                                    <?php if (!empty($data['menggantikan']) && !empty($nama_pg_disp)) echo " &"; ?>
+                                                    <?php if (!empty($nama_pg_disp)) echo " <span class='text-red-600 font-bold'>(Digantikan oleh " . htmlspecialchars($nama_pg_disp) . ")</span>"; ?>
+                                                <?php endif; ?>
                                             </strong>
-                                            <div class="text-[11px] text-gray-500 font-normal"><?php echo htmlspecialchars(trim($ktp_nama_utama) !== '' ? $ktp_nama_utama : '-'); ?></div>
+                                            <div class="text-[11px] text-gray-500 font-normal"><?php echo htmlspecialchars(trim((string)$ktp_nama_utama) !== '' ? $ktp_nama_utama : '-'); ?></div>
 
                                             <?php $show_badge = !(($data['status_rkk'] ?? '') == 'Hadir' && $attendanceStatus != 'TIDAK HADIR'); ?>
                                             <?php if ($show_badge) : ?>
