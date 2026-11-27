@@ -1212,6 +1212,15 @@ if (isset($_POST['ganti_batal']) && !empty($_POST['ganti_tgl']) && isset($_POST[
 								}
 								// $dev_names_map dihitung di atas (sebelum tabel utama) agar panel TDR bisa pakai juga.
 								if (!isset($dev_names_map)) $dev_names_map = [];
+								// 2026-11-25: jadwal asli (dari Realisasi) untuk baris digantikan,
+								// supaya telat pengganti tetap dibandingkan dengan jam orang yang digantikan.
+								$jadwal_pengganti_map = [];
+								$ta_jp = $koneksi->real_escape_string($TanggalAwalMinus1 ?? $TanggalAwal);
+								$tk_jp = $koneksi->real_escape_string($TanggalAkhir);
+								$qjp = $koneksi->query("SELECT d.tgl_realisasi_detail AS tgl, TRIM(PG.no_absen) AS pin, d.r_jam_masuk AS jam FROM tb_realisasi_detail d JOIN ms_karyawan PG ON PG.id_karyawan = d.id_pengganti WHERE d.id_pengganti IS NOT NULL AND d.id_pengganti > 0 AND d.tgl_realisasi_detail BETWEEN '$ta_jp' AND '$tk_jp'");
+								while ($qjp && ($rjp = $qjp->fetch_assoc())) {
+								    $jadwal_pengganti_map[trim((string)$rjp['pin']) . '|' . $rjp['tgl']] = $rjp['jam'];
+								}
 								foreach ($paged_grouped as $key => $row) :
 									$PIN = $row['pin'];
 									$date = $row['date'];
@@ -1223,6 +1232,14 @@ if (isset($_POST['ganti_batal']) && !empty($_POST['ganti_tgl']) && isset($_POST[
 									$ganti_absen_nama = $row['ganti_absen_nama'] ?? '';
 									$ganti_upah = (float)($row['ganti_upah'] ?? 0);
 									$pengganti_note = '';
+									$jam_schedule_pg = $jadwal_pengganti_map[trim((string)$PIN) . '|' . $date] ?? '';
+									if ($jam_schedule_pg === '') {
+								        $tgl_plus1_jp = date('Y-m-d', strtotime($date . ' +1 day'));
+								        $jam_schedule_pg = $jadwal_pengganti_map[trim((string)$PIN) . '|' . $tgl_plus1_jp] ?? '';
+								    }
+									// Peta ini hanya berisi PIN pengganti dari Realisasi, jadi keberadaannya
+									// sudah cukup untuk menandai baris sebagai "digantikan".
+									$is_pengganti_tarik = $is_pengganti || ($ganti_absen_nama !== '') || ($jam_schedule_pg !== '');
 
 									// Cari karyawan di database lengkap dengan Departemen, Sub Departemen, OS/DHK, dan Golongan
 									$empQuery = $koneksi->query("SELECT k.nama_karyawan, k.upah, k.id_jadwal, d.nama_departmen, sd.nama_sub_department, o.OS_DHK as label_os, g.golongan as label_gol 
@@ -1326,6 +1343,12 @@ if (isset($_POST['ganti_batal']) && !empty($_POST['ganti_tgl']) && isset($_POST[
 										}
 									}
 
+									// Baris digantikan: jam masuk tetap pakai jadwal asli (bukan "Bebas")
+									// supaya telat pengganti terlihat & dihitung seperti baris lain.
+									if ($is_pengganti_tarik && !empty($jam_schedule_pg) && $jam_schedule_pg !== '00:00:00') {
+								        $s_masuk = $jam_schedule_pg;
+								    }
+
 									// Perhitungan Potongan Otomatis
 									$p_telat = 0;
 									$p_pulang = 0;
@@ -1396,6 +1419,13 @@ if (isset($_POST['ganti_batal']) && !empty($_POST['ganti_tgl']) && isset($_POST[
 										}
 									}
 
+									// 2026-11-25: baris digantikan tetap kena denda telat
+									if ($is_pengganti_tarik && $has_masuk && !empty($jam_schedule_pg) && $jam_schedule_pg !== '00:00:00') {
+									    $diff_masuk_pg = (intval((strtotime($masuk) - strtotime($jam_schedule_pg) + 86400) % 86400 / 60));
+									    if ($diff_masuk_pg > 720) $diff_masuk_pg -= 1440;
+									    if ($diff_masuk_pg > $tolMasukR) $p_telat = $globalDendaMasuk;
+									}
+
 									$key_lembur = $PIN . '_' . $date;
 									if (isset($custom_lembur[$key_lembur])) {
 										$final_lembur_jam = $custom_lembur[$key_lembur];
@@ -1458,6 +1488,12 @@ if (isset($_POST['ganti_batal']) && !empty($_POST['ganti_tgl']) && isset($_POST[
 										$dPulang = ($has_keluar && $s_keluar!='-') ? (intval((strtotime($s_keluar)-strtotime($pulang)+86400)%86400/60)) : 0; if($dPulang>720) $dPulang-=1440;
 										$is_late_masuk = ($has_masuk && $s_masuk!='-' && $dMasuk > $tolMasukR);
 										$is_early_pulang = ($has_keluar && $s_keluar!='-' && $dPulang > $tolPulangR);
+									}
+									// Baris digantikan: telat tetap merah walau shift-nya fleksibel
+									if ($is_pengganti_tarik && $has_masuk && !empty($jam_schedule_pg) && $jam_schedule_pg !== '00:00:00') {
+									    $dMasukPgRed = (intval((strtotime($masuk) - strtotime($jam_schedule_pg) + 86400) % 86400 / 60));
+									    if ($dMasukPgRed > 720) $dMasukPgRed -= 1440;
+									    $is_late_masuk = ($dMasukPgRed > $tolMasukR);
 									}
 									$dIstKel = ($has_ist_keluar && $s_ist_keluar!='-') ? (intval((strtotime($s_ist_keluar)-strtotime($istirahat_keluar)+86400)%86400/60)) : 0; if($dIstKel>720) $dIstKel-=1440;
 									$dIstMasuk = ($has_ist_masuk && $s_ist_masuk!='-') ? (intval((strtotime($istirahat_masuk)-strtotime($s_ist_masuk)+86400)%86400/60)) : 0; if($dIstMasuk>720) $dIstMasuk-=1440;

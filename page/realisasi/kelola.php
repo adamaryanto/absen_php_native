@@ -471,31 +471,40 @@ function bulkSavePenalties($koneksi, $id_realisasi)
         $p_tidak_lengkap = 0;
 
         $is_total_missing = (!$has_masuk && !$has_keluar);
-        // Flexi murni: bebas semua denda waktu
-        $is_flex_b = is_flexible_shift($row['shift_ket'] ?? '');
+        // 2026-11-25: flexi bebas denda WAKTU, kecuali ada target jam
+        // (mis. "FLEKSIBEL 12 JAM") dan baris digantikan (tetap kena telat).
+        $shift_ket_b = $row['shift_ket'] ?? '';
+        $is_flex_b = is_flexible_shift($shift_ket_b);
+        $is_pengganti_b = ((int)($row['id_pengganti'] ?? 0) > 0);
+        $flex_jam_b = 0;
+        if ($is_flex_b && preg_match('/(\d+)\s*JAM/i', $shift_ket_b, $m_flex_b)) $flex_jam_b = (int)$m_flex_b[1];
 
-        if (!$is_total_missing && !$is_flex_b) {
-            // Late Entrance (lewat toleransi)
-            if ($has_masuk && $s_masuk != '00:00:00' && late_minutes($row['ra_masuk'], $s_masuk) > $tol_b['masuk']) {
+        if (!$is_total_missing) {
+            // Late Entrance (baris digantikan sekarang ikut dihitung)
+            if ((!$is_flex_b || $is_pengganti_b) && $has_masuk && $s_masuk != '00:00:00' && late_minutes($row['ra_masuk'], $s_masuk) > $tol_b['masuk']) {
                 $p_telat = $gd_masuk;
             }
-            // Early Departure (lewat toleransi)
-            if ($has_keluar && $s_keluar != '00:00:00' && early_minutes($row['ra_keluar'], $s_keluar) > $tol_b['pulang']) {
+            // Flexi dengan target jam (mis. 12 jam): pulang sebelum target = pulang-cepat
+            if ($flex_jam_b > 0 && $has_masuk && $has_keluar) {
+                $m_ts_flex_b = strtotime($row['ra_masuk']);
+                $k_ts_flex_b = strtotime($row['ra_keluar']);
+                if ($k_ts_flex_b <= $m_ts_flex_b) $k_ts_flex_b = strtotime('+1 day', $k_ts_flex_b);
+                if (($flex_jam_b * 3600 - ($k_ts_flex_b - $m_ts_flex_b)) > ((int)($tol_b['pulang'] ?? 5) * 60)) {
+                    $p_pulang = $gd_pulang;
+                }
+            } elseif (!$is_flex_b && $has_keluar && $s_keluar != '00:00:00' && early_minutes($row['ra_keluar'], $s_keluar) > $tol_b['pulang']) {
                 $p_pulang = $gd_pulang;
             }
-            // Early Break (lewat toleransi)
-            if ($has_ist_keluar && $s_ist_keluar != '00:00:00' && early_minutes($row['ra_istirahat_keluar'], $s_ist_keluar) > $tol_b['ist_keluar']) {
-                $p_ist_awal = $gd_istirahat_awal;
+            if (!$is_flex_b) {
+                // Early Break (lewat toleransi)
+                if ($has_ist_keluar && $s_ist_keluar != '00:00:00' && early_minutes($row['ra_istirahat_keluar'], $s_ist_keluar) > $tol_b['ist_keluar']) {
+                    $p_ist_awal = $gd_istirahat_awal;
+                }
+                // Late Break Return (lewat toleransi)
+                if ($has_ist_masuk && $s_ist_masuk != '00:00:00' && late_minutes($row['ra_istirahat_masuk'], $s_ist_masuk) > $tol_b['ist_masuk']) {
+                    $p_ist_telat = $gd_istirahat_telat;
+                }
             }
-            // Late Break Return (lewat toleransi)
-            if ($has_ist_masuk && $s_ist_masuk != '00:00:00' && late_minutes($row['ra_istirahat_masuk'], $s_ist_masuk) > $tol_b['ist_masuk']) {
-                $p_ist_telat = $gd_istirahat_telat;
-            }
-
-            $shift_ket = $row['shift_ket'] ?? '';
-            $is_flexible = is_flexible_shift($shift_ket);
-            // 2026-11-10: Baris digantikan = FLEXIBLE (tap pengganti jangan didenda).
-            if ((int)($row['id_pengganti'] ?? 0) > 0) $is_flexible = true;
             // 2026-11-10: Denda tidak lengkap TIDAK lagi menghitung istirahat.
             $hasIncompleteBreak = false;
 
@@ -855,15 +864,32 @@ function bulkSavePenalties($koneksi, $id_realisasi)
 
                                      $isTotalMissing = (!$has_masuk && !$has_keluar);
                                      $hasIncompleteMain = ($has_masuk xor $has_keluar);
-                                     $shift_ket = $data['shift_ket'] ?? '';
-                                     $is_flexible = is_flexible_shift($shift_ket);
-                                     // 2026-11-10: Baris digantikan = FLEXIBLE (tap pengganti jangan didenda).
-                                     if (!empty($data['digantikan_oleh']) || !empty($data['pengganti_langsung'])) $is_flexible = true;
-                                     $isRestExpected = (!$is_flexible && !empty($data['r_istirahat_keluar']) && $data['r_istirahat_keluar'] != '00:00:00');
-                                     // 2026-11-10: Denda tidak lengkap TIDAK lagi menghitung istirahat.
-                                     $hasIncompleteBreak = false;
-                                     // Flexi murni: tanpa merah telat/pulang-cepat/istirahat
-                                     if ($is_flexible) { $isLate = $isEarlyOut = $isLateBreak = $isEarlyBreak = false; }
+                                      $shift_ket = $data['shift_ket'] ?? '';
+                                      $is_flexible = is_flexible_shift($shift_ket);
+                                      // 2026-11-25: baris digantikan tetap dihitung keterlambatannya.
+                                      $is_pengganti_row = !empty($data['digantikan_oleh']) || !empty($data['pengganti_langsung']);
+                                      if ($is_pengganti_row) $is_flexible = true;
+                                      // Flexi dengan target jam (mis. "FLEKSIBEL 12 JAM"):
+                                      // pulang sebelum target = tanda pulang-cepat.
+                                      $flex_jam_target = 0;
+                                      if ($is_flexible && preg_match('/(\d+)\s*JAM/i', $shift_ket, $m_flex)) {
+                                          $flex_jam_target = (int)$m_flex[1];
+                                      }
+                                      if ($is_flexible && $flex_jam_target > 0 && $has_masuk && $has_keluar) {
+                                          $m_ts_flex = strtotime($data['ra_masuk']);
+                                          $k_ts_flex = strtotime($data['ra_keluar']);
+                                          if ($k_ts_flex <= $m_ts_flex) $k_ts_flex = strtotime('+1 day', $k_ts_flex);
+                                          if (($flex_jam_target * 3600 - ($k_ts_flex - $m_ts_flex)) > ((int)($tol['pulang'] ?? 5) * 60)) {
+                                              $isEarlyOut = true;
+                                          }
+                                      }
+                                      $isRestExpected = (!$is_flexible && !empty($data['r_istirahat_keluar']) && $data['r_istirahat_keluar'] != '00:00:00');
+                                      $hasIncompleteBreak = false;
+                                      if ($is_flexible) {
+                                          if (!$is_pengganti_row) $isLate = false;
+                                          if (!$flex_jam_target) $isEarlyOut = false;
+                                          $isLateBreak = $isEarlyBreak = false;
+                                      }
 
                                      // Logic Status Kehadiran (Refined)
                                      // Attendance Status Logic (ENUM-based)
@@ -911,14 +937,14 @@ function bulkSavePenalties($koneksi, $id_realisasi)
                                         // Status 1 (Manual) or 2 (Synced)
                                         // Calculate dynamically based on real-time shift data
                                         // Flexi murni: bebas semua denda waktu
-                                        $potPulangValue = (!$is_flexible && $isEarlyOut && !$isTotalMissing) ? $globalDendaPulang : 0;
+                                        $potPulangValue = ((!$is_flexible || $flex_jam_target > 0) && $isEarlyOut && !$isTotalMissing) ? $globalDendaPulang : 0;
                                         // 2026-11-11: Denda tidak lengkap (absen utama tidak
                                         // lengkap) TETAP kena walau baris FLEXIBLE/digantikan.
                                         // FLEXIBLE hanya membebaskan denda WAKTU (telat/cepat/
                                         // istirahat). Kalau masuk ada pulang tidak ada (atau
                                         // sebaliknya), tetap didenda 25rb.
                                         $potTidakLengkapValue = (!$isTotalMissing && $hasIncompleteMain) ? $globalDendaTidakLengkap : 0;
-                                        $potTelatValue = (!$is_flexible && $isLate) ? $globalDendaMasuk : 0;
+                                        $potTelatValue = ((!$is_flexible || $is_pengganti_row) && $isLate) ? $globalDendaMasuk : 0;
                                         $potIstirahatKeluarValue = (!$is_flexible && $isEarlyBreak) ? $globalDendaIstirahatKeluar : 0;
                                         $potIstirahatMasukValue = (!$is_flexible && $isLateBreak) ? $globalDendaIstirahatMasuk : 0;
                                         $potLainnyaValue = $data['r_potongan_lainnya'];
