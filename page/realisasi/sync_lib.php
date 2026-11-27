@@ -1,5 +1,6 @@
 <?php
 // Library sync realisasi (dipakai kelola.php & tarik_ajax.php). Guarded agar aman double-include.
+require_once __DIR__ . '/grouping_lib.php';
 if (!function_exists('is_flexible_shift')) {
     // Deteksi shift fleksibel dua ejaan: Flexible (X) & Fleksibel/Fleksi (KS).
     // Seluruh kode yg tadinya cek 'FLEXI' saja gagal mengenali "Fleksibel".
@@ -18,7 +19,11 @@ if (!function_exists('late_minutes')) {
     // 20:07) tetap telat 967 mnt karena 20:07 memang sesudah 04:00 di hari yg sama.
     function late_minutes($actual, $expected) {
         if (empty($actual) || empty($expected) || $actual == '00:00:00' || $expected == '00:00:00' || $expected == 'Bebas') return 0;
-        return (int)((strtotime($actual) - strtotime($expected)) / 60);
+        $diff = strtotime($actual) - strtotime($expected);
+        // 2026-11-25 DINI_HARI: tap sebelum tengah malam (mis. 23:56 untuk
+        // jadwal 00:00) adalah MASUK LEBIH AWAL, bukan telat 23 jam.
+        if ($diff > 43200) $diff -= 86400;
+        return (int)($diff / 60);
     }
     // Menit kepulangan-awal (positif = pulang lebih cepat), normalisasi sama.
     function early_minutes($actual, $expected) {
@@ -90,6 +95,9 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
     // Realisasi 68: 241 baris ketulis 4 Nov padahal Realisasi 3 Nov).
     $tgl_cap = $data_real['tgl_realisasi'];
     $tgl_next = date('Y-m-d', strtotime('+1 day', strtotime($tgl_real)));
+    // 2026-11-25 DINI_HARI: tanggal H-1 dipakai untuk menangkap tap masuk
+    // sebelum tengah malam pada shift yang mulai 00:00 (mis. "Shift 24 - 12").
+    $tgl_prev = date('Y-m-d', strtotime('-1 day', strtotime($tgl_real)));
 
     // Preload SEMUA log 2 hari SEKALI (ganti N query per karyawan).
     // Urutan per pin dipertahankan (tgl ASC, detail_waktu ASC) persis query lama.
@@ -104,6 +112,18 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
             while ($br = $qb->fetch_assoc()) $bulk_logs[$br['userid']][] = $br;
         }
     }
+
+    // 2026-11-25 DINI_HARI: preload tap H-1 sekali (bukan per baris). Tap malam
+    // sebelum Realisasi bisa jadi MASUK shift yang mulai 00:00.
+    $prev_logs = [];
+    $tp_e = $koneksi->real_escape_string($tgl_prev);
+    $qpv = $koneksi->query("SELECT userid, tgl, status, detail_waktu, source_device_id FROM tb_record WHERE tgl = '$tp_e' ORDER BY detail_waktu ASC");
+    while ($qpv && ($rpv = $qpv->fetch_assoc())) $prev_logs[$rpv['userid']][] = $rpv;
+
+    // 2026-11-25 TARIK_SAMA: grouping resmi PERSIS seperti halaman Tarik Data.
+    // Key "PIN_tanggal"; tanggal grup = tanggal tap pertama (merge malam <=16 jam).
+    // Realisasi hanya memakai grup yang tanggalnya SAMA dengan tanggal baris.
+    $grouped_map = group_taps_by_pin_date($koneksi, $tgl_prev, $tgl_next, '');
 
     // 2026-11-18: PIN yang SAMA bisa dipakai ORANG BERBEDA di mesin berbeda.
     // Tap dari PIN milik karyawan lain (PIN = no_absen orang lain) JANGAN
@@ -284,6 +304,7 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
                 $tgl_next2 = date('Y-m-d', strtotime('+1 day', strtotime($tgl_real)));
                     $tgl_e = $koneksi->real_escape_string($tgl_real);
                 $tgl_e2 = $koneksi->real_escape_string($tgl_next2);
+                $tgl_e0 = $koneksi->real_escape_string($tgl_prev);
                 foreach ($extra_pins as $ep) {
                     $did_ep = (int)($ep[0] ?? 0);
                     $pin_ep = trim((string)($ep[1] ?? ''));
@@ -292,7 +313,7 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
                     // absen karyawan LAIN (tap itu milik orang tersebut, bukan dia).
                     if (isset($absen_owner[$pin_ep]) && !in_array((int)$idk_row, $absen_owner[$pin_ep], true)) continue;
                     $pin_e = $koneksi->real_escape_string($pin_ep);
-                    $q_ep = $koneksi->query("SELECT * FROM tb_record WHERE source_device_id = '$did_ep' AND TRIM(userid) = '$pin_e' AND tgl IN ('$tgl_e','$tgl_e2') ORDER BY tgl ASC, detail_waktu ASC");
+                    $q_ep = $koneksi->query("SELECT * FROM tb_record WHERE source_device_id = '$did_ep' AND TRIM(userid) = '$pin_e' AND tgl IN ('$tgl_e0','$tgl_e','$tgl_e2') ORDER BY tgl ASC, detail_waktu ASC");
                     while ($q_ep && ($r_ep = $q_ep->fetch_assoc())) $raw_logs[] = $r_ep;
                 }
                 if (!empty($raw_logs)) usort($raw_logs, function($a, $b) {
@@ -318,18 +339,25 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
                     $tgl_e = $koneksi->real_escape_string($tgl_real);
                     $tgl_nx = date('Y-m-d', strtotime('+1 day', strtotime($tgl_real)));
                     $tgl_e2 = $koneksi->real_escape_string($tgl_nx);
+                    $tgl_e0 = $koneksi->real_escape_string($tgl_prev);
                     $q_dup = $koneksi->query("SELECT no_absen FROM ms_karyawan WHERE id_karyawan <> '$idk_row' AND UPPER(TRIM(nama_karyawan)) = UPPER(TRIM('$nm_e')) AND TRIM(COALESCE(no_absen,'')) <> ''");
                     while ($q_dup && ($r_dup = $q_dup->fetch_assoc())) {
                         $pin_dup = trim((string)($r_dup['no_absen'] ?? ''));
                         if ($pin_dup === '' || $pin_dup === (string)$no_absen) continue;
                         $pin_d = $koneksi->real_escape_string($pin_dup);
-                        $q_dd = $koneksi->query("SELECT * FROM tb_record WHERE userid = '$pin_d' AND tgl IN ('$tgl_e','$tgl_e2') ORDER BY tgl ASC, detail_waktu ASC");
+                        $q_dd = $koneksi->query("SELECT * FROM tb_record WHERE userid = '$pin_d' AND tgl IN ('$tgl_e0','$tgl_e','$tgl_e2') ORDER BY tgl ASC, detail_waktu ASC");
                         while ($q_dd && ($r_dd = $q_dd->fetch_assoc())) $raw_logs[] = $r_dd;
                     }
                     if (!empty($raw_logs)) usort($raw_logs, function($a, $b) {
                         return strcmp(($a['tgl'] ?? '') . ' ' . ($a['detail_waktu'] ?? ''), ($b['tgl'] ?? '') . ' ' . ($b['detail_waktu'] ?? ''));
                     });
                 }
+            }
+
+            // 2026-11-25 DINI_HARI: sertakan tap H-1 untuk PIN utama baris ini
+            // (dipakai saat mencocokkan MASUK shift yang mulai 00:00).
+            if (!empty($prev_logs[$no_absen])) {
+                foreach ($prev_logs[$no_absen] as $lpv) $raw_logs[] = $lpv;
             }
 
             $log_masuk = null;
@@ -347,9 +375,13 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
             // Kalau jadwal kosong, pakai aturan lama.
             $s_masuk_t = trim((string)$s_masuk);
             $s_keluar_t = trim((string)$s_keluar);
-            $has_jadwal = ($s_masuk_t !== '' && $s_masuk_t !== '00:00:00' && $s_keluar_t !== '' && $s_keluar_t !== '00:00:00');
+            // 2026-11-25 DINI_HARI: jam masuk "00:00:00" TETAP dianggap jadwal
+            // selama jam keluar nyata (mis. "Shift 24 - 12" = 00:00-12:00).
+            // Shift fleksibel (jam keluar juga 00:00) tetap tanpa jadwal.
+            $has_jadwal = ($s_masuk_t !== '' && $s_keluar_t !== '' && $s_keluar_t !== '00:00:00');
             $tgl_next_sched = date('Y-m-d', strtotime('+1 day', strtotime($tgl_real)));
             $sched_in_ts = null; $sched_out_ts = null;
+            $best_in_ts = null;
             if ($has_jadwal) {
                 $sched_in_ts = strtotime($tgl_real . ' ' . $s_masuk_t);
                 // Shift malam (keluar < masuk): jadwal pulang di hari berikutnya.
@@ -357,13 +389,20 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
                     ? strtotime($tgl_next_sched . ' ' . $s_keluar_t)
                     : strtotime($tgl_real . ' ' . $s_keluar_t);
                 $best_in = null; $best_in_diff = null;
+                // 2026-11-25 DINI_HARI: tap H-1 yang jatuh beberapa jam SEBELUM
+                // jam masuk boleh jadi MASUK (karyawan finger sebelum tengah
+                // malam untuk shift 00:00). Dibatasi 4 jam sebelum masuk agar
+                // tap lama H-1 tidak salah dianggap masuk.
+                $early_window = 4 * 3600;
                 foreach ($raw_logs as $l) {
-                    if ($l['tgl'] != $tgl_real) continue;
+                    $is_same_day = ($l['tgl'] == $tgl_real);
                     $ct = substr($l['detail_waktu'], 11, 8);
                     $ts = strtotime($l['tgl'] . ' ' . $ct);
+                    $is_early_prev = ($l['tgl'] == $tgl_prev && $ts <= $sched_in_ts && ($sched_in_ts - $ts) <= $early_window);
+                    if (!$is_same_day && !$is_early_prev) continue;
                     $d_in = abs($ts - $sched_in_ts);
                     if ($d_in > abs($ts - $sched_out_ts)) continue; // lebih dekat ke pulang -> bukan masuk
-                    if ($best_in_diff === null || $d_in < $best_in_diff) { $best_in_diff = $d_in; $best_in = $ct; }
+                    if ($best_in_diff === null || $d_in < $best_in_diff) { $best_in_diff = $d_in; $best_in = $ct; $best_in_ts = $ts; }
                 }
                 $log_masuk = $best_in;
             } else {
@@ -389,7 +428,9 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
             // ke-detek walau orangnya lupa finger masuk).
             $in_timestamp = null;
             if ($log_masuk) {
-                $in_timestamp = strtotime($tgl_real . ' ' . $log_masuk);
+                // 2026-11-25 DINI_HARI: anchor pakai tanggal tap sebenarnya
+                // (tap masuk bisa dari H-1 untuk shift 00:00).
+                $in_timestamp = ($best_in_ts !== null) ? $best_in_ts : strtotime($tgl_real . ' ' . $log_masuk);
             } elseif ($has_jadwal) {
                 $in_timestamp = $sched_in_ts;
             }
@@ -537,7 +578,56 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
                     }
                 }
             }
-            
+
+            // 2026-11-25 TARIK_SAMA: pakai grup resmi halaman Tarik Data.
+            // Aturan tambahan: bila grup ada di H-1 dan jam masuknya <=2 jam
+            // SEBELUM jadwal masuk hari ini (mis. 23:5x untuk shift 00:00),
+            // tap itu tetap dihitung MASUK & hadir di tanggal Realisasi ini.
+            $grouped_elsewhere = false;
+            $grp_source_date = $tgl_real;
+            $group_key = trim((string)$no_absen) . '_' . $tgl_real;
+            $grp = $grouped_map[$group_key] ?? null;
+            if ($grp === null) {
+                $prev_key = trim((string)$no_absen) . '_' . $tgl_prev;
+                if (isset($grouped_map[$prev_key]) && !empty($grouped_map[$prev_key]['masuk'])) {
+                    $grp_prev = $grouped_map[$prev_key];
+                    $masuk_prev_ts = strtotime($tgl_prev . ' ' . $grp_prev['masuk']);
+                    if ($sched_in_ts !== null && $masuk_prev_ts <= $sched_in_ts && ($sched_in_ts - $masuk_prev_ts) <= 2 * 3600) {
+                        $grp = $grp_prev;
+                        $grp_source_date = $tgl_prev;
+                    }
+                }
+            }
+            if ($grp !== null) {
+                $log_masuk = !empty($grp['masuk']) ? $grp['masuk'] : null;
+                $log_keluar = !empty($grp['pulang']) ? $grp['pulang'] : null;
+                $log_ist_keluar = !empty($grp['istirahat_keluar']) ? $grp['istirahat_keluar'] : null;
+                $log_ist_masuk = !empty($grp['istirahat_masuk']) ? $grp['istirahat_masuk'] : null;
+            } else {
+                $log_masuk = null;
+                $log_keluar = null;
+                $log_ist_keluar = null;
+                $log_ist_masuk = null;
+                // Tap masuk ke grup tanggal lain dan tidak memenuhi syarat <=2 jam
+                // -> baris ini tidak menarik data (sama seperti Tarik Data).
+                $grouped_elsewhere = isset($grouped_map[trim((string)$no_absen) . '_' . $tgl_prev]);
+            }
+            // Hitung ulang lembur otomatis dari hasil grup (pakai tanggal asli
+            // grup, karena masuk bisa berasal dari H-1 malam).
+            $ot_hours_auto = 0;
+            if ($log_keluar && ($log_masuk || $has_jadwal)) {
+                $in_grp_ts = $log_masuk ? strtotime($grp_source_date . ' ' . $log_masuk) : $sched_in_ts;
+                $out_grp_ts = strtotime($grp_source_date . ' ' . $log_keluar);
+                if ($in_grp_ts && $out_grp_ts <= $in_grp_ts) $out_grp_ts = strtotime('+1 day', $out_grp_ts);
+                if ($has_jadwal && $sched_out_ts !== null && $in_grp_ts) {
+                    $diff_ot = $out_grp_ts - $sched_out_ts;
+                    if ($diff_ot > 43200) $diff_ot -= 86400;
+                    elseif ($diff_ot < -43200) $diff_ot += 86400;
+                    $ot_min = (int)floor($diff_ot / 60);
+                    if ($ot_min > 10) $ot_hours_auto = $ot_min / 60;
+                }
+            }
+
             $logs = [
                 'log_masuk' => $log_masuk,
                 'log_keluar' => $log_keluar,
@@ -686,14 +776,17 @@ function syncRealisasiData($koneksi, $id_realisasi, $prelogs = null, $prelogs_ok
         // 2026-11-10: Baris diganti yang penggantinya TIDAK finger hari itu
         // dibiarkan apa adanya (jangan di-nol-kan) — tap-nya mungkin belum
         // ketarik dari mesin. Baris ini hanya diisi kalau pengganti ada tap-nya.
-        if ($id_pengganti > 0 && $is_total_missing) continue;
+        if ($id_pengganti > 0 && $is_total_missing && empty($grouped_elsewhere)) continue;
 
         // 2026-11-10: Baris MANUAL (status=1, diisi Detail / Tambah Karyawan)
         // yang TIDAK ada tap-nya di mesin dibiarkan apa adanya (jangan dikosongkan).
         // Ini melindungi input manual di Detail & KARYAWAN TAMBAHAN dari TDR:
         // kalau tap tidak ketemu (PIN kosong / finger belum terdaftar di mesin),
         // jam yang sudah diinput manual jangan dihapus oleh Tarik Data.
-        if ((int)($status_rd ?? 0) === 1 && $is_total_missing) continue;
+        // 2026-11-25 TARIK_SAMA: kalau tap karyawan justru masuk ke grup tanggal
+        // lain, baris ini TIDAK dikunci manual — datanya ikut dikosongkan supaya
+        // tidak nyangkut jam lama (sesuai halaman Tarik Data: tgl ini tak ada grup).
+        if ((int)($status_rd ?? 0) === 1 && $is_total_missing && empty($grouped_elsewhere)) continue;
 
         // 2026-11-11: Lembur OTOMATIS (tanpa input manual) — sama seperti rumus
         // di Tarik Data: lembur = pulang melewati jam pulang jadwal (datang pagi

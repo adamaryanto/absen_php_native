@@ -65,7 +65,7 @@ if ($_SESSION['iduser'] != "" && $_SESSION['nama'] != "") {
   // Process AJAX update lembur before outputting any HTML
   if (isset($_POST['update_lembur_ajax'])) {
       $user_role = strtolower($_SESSION['role'] ?? '');
-      $can_edit = ($user_role === 'kepala pabrik' || $user_role === 'admin master' || $user_role === 'owner');
+      $can_edit = ($user_role === 'kepala pabrik' || $user_role === 'admin master');
       if (!$can_edit) {
           echo json_encode(['success' => false, 'message' => 'Anda tidak memiliki hak akses untuk mengedit lembur.']);
           exit;
@@ -281,15 +281,17 @@ if ($_SESSION['iduser'] != "" && $_SESSION['nama'] != "") {
               <?php } ?>
 
               <?php if (strtolower($role) != 'owner') { ?>
-              <?php if (strtolower($role) === 'admin master') { ?>
-              <!-- 2026-11-09: Menu Tarik Data hanya untuk Admin Master (Reza). Role lain jangan. -->
-              <li class="nav-item">
-                <a href="?page=generate&aksi=tarik" class="nav-link"><i class="nav-icon fas fa-download"></i><p>Tarik Data</p></a>
-              </li>
-              <li class="nav-item">
-                <a href="?page=restore" class="nav-link"><i class="nav-icon fas fa-undo-alt"></i><p>Restore</p></a>
-              </li>
-              <?php } ?>
+               <?php if (in_array(strtolower($role), ['admin master', 'kepala pabrik'], true)) { ?>
+               <!-- 2026-11-25: Tarik Data untuk Admin Master & Kepala Pabrik. -->
+               <li class="nav-item">
+                 <a href="?page=generate&aksi=tarik" class="nav-link"><i class="nav-icon fas fa-download"></i><p>Tarik Data</p></a>
+               </li>
+               <?php } ?>
+               <?php if (strtolower($role) === 'admin master') { ?>
+               <li class="nav-item">
+                 <a href="?page=restore" class="nav-link"><i class="nav-icon fas fa-undo-alt"></i><p>Restore</p></a>
+               </li>
+               <?php } ?>
 
               <li class="nav-item">
                 <a href="javascript:void(0)" class="nav-link" onclick="var li=this.parentElement; var sub=li.querySelector('.nav-treeview'); if(sub){ var open=li.classList.toggle('menu-open'); sub.style.display=open?'block':'none'; var ic=this.querySelector('.right'); if(ic){ ic.classList.toggle('fa-angle-left',!open); ic.classList.toggle('fa-angle-down',open);} } return false;">
@@ -365,12 +367,12 @@ if ($_SESSION['iduser'] != "" && $_SESSION['nama'] != "") {
                       }
                   }
 
-                  // 2026-11-09: Halaman Tarik Data hanya untuk Admin Master (Reza).
-                  // Role lain (Owner, Kepala Pabrik, Admin HR) jangan — menu juga
+                  // 2026-11-25: Halaman Tarik Data untuk Admin Master & Kepala Pabrik.
+                  // Role lain (Owner, Admin HR) tetap ditolak — menu juga
                   // disembunyikan dari sidebar. Tarik Data di Kelola tidak kena
                   // gate ini (jalurnya lewat kelola.php / tarik_ajax.php sendiri).
-                  if ($page === 'generate' && $aksi === 'tarik' && strtolower($role ?? '') !== 'admin master') {
-                      echo "<script>alert('Akses ditolak: halaman Tarik Data hanya untuk Admin Master.'); window.location.href='?page=realisasi';</script>"; exit;
+                  if ($page === 'generate' && in_array($aksi, ['tarik', 'detail_tarik'], true) && !in_array(strtolower($role ?? ''), ['admin master', 'kepala pabrik'], true)) {
+                      echo "<script>alert('Akses ditolak: halaman Tarik Data hanya untuk Admin Master dan Kepala Pabrik.'); window.location.href='?page=realisasi';</script>"; exit;
                   }
 
                   // 2026-11-17: Menu Finance (Periode, Rekap Pengeluaran, Cetak Slip)
@@ -471,6 +473,7 @@ if ($_SESSION['iduser'] != "" && $_SESSION['nama'] != "") {
                   } else if ($page == 'generate') {
                     if ($aksi == "") { include "page/generate/generate.php"; } 
                     elseif ($aksi == "tarik") { include "page/generate/tarik-data.php"; }
+                    elseif ($aksi == "detail_tarik") { include "page/generate/detail_tarik.php"; }
                   } else if ($page == 'restore') {
                     include "page/restore/restore.php";
                   } else if ($page == 'rkk') {

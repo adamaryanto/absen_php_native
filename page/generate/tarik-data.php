@@ -3,10 +3,10 @@
 set_time_limit(0); // unlimited
 ignore_user_abort(true);
 
-// 2026-11-09: Halaman Tarik Data hanya untuk Admin Master (Reza). Gate di
+// 2026-11-25: Halaman Tarik Data untuk Admin Master & Kepala Pabrik. Gate di
 // router index.php sudah menolak role lain; ini jaga akses langsung ke file.
-if (strtolower($_SESSION['role'] ?? '') !== 'admin master') {
-    echo "<script>alert('Akses ditolak: halaman Tarik Data hanya untuk Admin Master.'); window.location.href='?page=realisasi';</script>"; exit;
+if (!in_array(strtolower($_SESSION['role'] ?? ''), ['admin master', 'kepala pabrik'], true)) {
+    echo "<script>alert('Akses ditolak: halaman Tarik Data hanya untuk Admin Master dan Kepala Pabrik.'); window.location.href='?page=realisasi';</script>"; exit;
 }
 
 // Include device sync helper for multi-device support
@@ -1549,9 +1549,12 @@ if (isset($_POST['ganti_batal']) && !empty($_POST['ganti_tgl']) && isset($_POST[
 											<div class="flex gap-1 justify-center">
 												<?php 
 												$user_role = strtolower($_SESSION['role'] ?? '');
-												$can_edit = ($user_role === 'kepala pabrik' || $user_role === 'admin master' || $user_role === 'owner');
+												$can_edit = ($user_role === 'kepala pabrik' || $user_role === 'admin master');
 												if ($can_edit): 
 												?>
+												<a href="?page=generate&aksi=detail_tarik&pin=<?= urlencode($PIN) ?>&tgl=<?= urlencode($date) ?>" class="btn btn-xs btn-info shadow-sm" style="border-radius:4px; padding:3px 8px;" title="Edit tap absen (Tarik Data)">
+													<i class="fa fa-edit"></i> Detail
+												</a>
 												<button type="button" class="btn btn-xs btn-primary btn-edit-lembur shadow-sm" data-pin="<?= htmlspecialchars($PIN) ?>" data-date="<?= htmlspecialchars($date) ?>" data-nama="<?= htmlspecialchars($nama_karyawan) ?>" data-lembur-jam="<?= $final_lembur_jam ?>" style="border-radius:4px; padding:3px 8px;">
 													<i class="fa fa-clock"></i> Lembur
 												</button>
